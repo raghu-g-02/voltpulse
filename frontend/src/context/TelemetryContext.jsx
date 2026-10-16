@@ -1,6 +1,6 @@
 // src/context/TelemetryContext.jsx
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
-import { collection, addDoc, query, orderBy, onSnapshot } from "firebase/firestore";
+import { collection, doc, setDoc, query, orderBy, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "./AuthContext";
 
@@ -8,6 +8,23 @@ const FAULT_NAMES = {
   1: "Motor Transmission Overload",
   2: "Inverter Voltage Sag",
   3: "Battery Thermal Overheat",
+};
+
+// Explicit cross-platform date and time standardizers (Forces DD/MM/YYYY and uppercase AM/PM)
+const formatEVDate = (d) => {
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const year = d.getFullYear();
+  return `${day}/${month}/${year}`;
+};
+
+const formatEVTime = (d) => {
+  return d.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
 };
 
 const defaultContextValue = {
@@ -35,7 +52,7 @@ const defaultContextValue = {
 
 const TelemetryContext = createContext(defaultContextValue);
 
-// Sanitized API base URL (strips trailing slashes if present)
+// Sanitized API base URL
 const rawApiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const API_BASE = rawApiBase.replace(/\/$/, "");
 
@@ -74,6 +91,7 @@ export function TelemetryProvider({ children }) {
   const lastSpokenSignatureRef = useRef(null);
   const hasSpokenInitialGreetingRef = useRef(false);
   const isLoggingTransitionRef = useRef(false);
+  const lastProcessedSignatureRef = useRef(null);
 
   const toggleVoiceMute = () => {
     setIsVoiceMuted((prev) => {
@@ -125,8 +143,8 @@ export function TelemetryProvider({ children }) {
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const records = [];
-      snapshot.forEach((doc) => {
-        records.push({ id: doc.id, ...doc.data() });
+      snapshot.forEach((docSnap) => {
+        records.push({ id: docSnap.id, ...docSnap.data() });
       });
       setFaultHistory(records);
     }, (error) => {
@@ -136,7 +154,7 @@ export function TelemetryProvider({ children }) {
     return () => unsubscribe();
   }, [currentUser, isAdmin]);
 
-  // 1. CONTINUOUS 60-SECOND SENSOR LOGGER (1-Minute Sustained Interval)
+  // 1. CONTINUOUS 60-SECOND SENSOR LOGGER (Deduplicated Across Multiple Devices via Minute-Bucket Key)
   useEffect(() => {
     if (!currentUser || isAdmin || !userChassis) return;
 
@@ -154,10 +172,14 @@ export function TelemetryProvider({ children }) {
       const currentClass = agent?.diagnosis?.fault_class ?? 0;
       const currentLabel = agent?.diagnosis?.diagnosis_label || (currentClass === 0 ? "Normal Operation" : "Fault Detected");
 
+      // Idempotent document key: only one entry per vehicle per minute regardless of open devices
+      const minuteBucket = Math.floor(now.getTime() / 60000);
+      const logDocId = `LOG_${userChassis}_${minuteBucket}`;
+
       const record = {
-        timestampRaw: Date.now(),
-        date: now.toLocaleDateString(),
-        time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        timestampRaw: now.getTime(),
+        date: formatEVDate(now),
+        time: formatEVTime(now),
         chassis: userChassis,
         voltage: v.toFixed(2),
         current: parseFloat(tel?.Current ?? tel?.current_amps ?? 0).toFixed(2),
@@ -169,14 +191,16 @@ export function TelemetryProvider({ children }) {
         faultClass: currentClass
       };
 
-      const logsRef = collection(db, "users", currentUser.uid, "telemetry_logs");
-      addDoc(logsRef, record).catch((e) => console.error("Error logging 60s telemetry:", e));
+      const logDocRef = doc(db, "users", currentUser.uid, "telemetry_logs", logDocId);
+      setDoc(logDocRef, record, { merge: true }).catch((e) =>
+        console.error("Error logging 60s telemetry:", e)
+      );
     }, 60000);
 
     return () => clearInterval(timer);
   }, [currentUser, isAdmin, userChassis]);
 
-  // 2. DYNAMIC FAULT INCREASE / DECREASE / RECOVERY LOGGER
+  // 2. DYNAMIC FAULT INCREASE / DECREASE / RECOVERY LOGGER (Deterministic & Deduplicated)
   useEffect(() => {
     if (!agentResult || !currentUser || isAdmin || !userChassis) return;
 
@@ -190,12 +214,24 @@ export function TelemetryProvider({ children }) {
     const currentCount = currentActiveClasses.length;
     const currentSignature = currentActiveClasses.join("_");
 
-    const v = parseFloat(telemetry.Voltage ?? telemetry.bus_voltage ?? 0);
-    const temp = parseFloat(telemetry.Temperature ?? telemetry.motor_temp ?? 0);
+    const tel = latestTelemetryRef.current;
+    const v = parseFloat(tel?.Voltage ?? tel?.bus_voltage ?? 0);
+    const temp = parseFloat(tel?.Temperature ?? tel?.motor_temp ?? 0);
 
+    // Skip uninitialized hardware standby
     if (v <= 0.5 && temp <= 1.0) return;
 
+    // Local in-memory lock
+    if (lastProcessedSignatureRef.current === currentSignature) return;
+
     const lastEvent = faultHistory.length > 0 ? faultHistory[0] : null;
+
+    // Cross-device guard: if another device already wrote this exact signature in the last 15 seconds, absorb it
+    if (lastEvent && (lastEvent.signature ?? "") === currentSignature && (Date.now() - (lastEvent.timestampRaw || 0) < 15000)) {
+      lastProcessedSignatureRef.current = currentSignature;
+      return;
+    }
+
     let prevActiveClasses = [];
     if (lastEvent) {
       if (lastEvent.eventType === "RECOVERY_NORMAL") {
@@ -209,8 +245,6 @@ export function TelemetryProvider({ children }) {
 
     const prevCount = prevActiveClasses.length;
     const prevSignature = prevActiveClasses.join("_");
-
-    if (isLoggingTransitionRef.current) return;
 
     if (currentSignature !== prevSignature) {
       const prevSet = new Set(prevActiveClasses);
@@ -243,13 +277,18 @@ export function TelemetryProvider({ children }) {
         transitionLabel = `Fault Shifted: Cleared ${clearedNames.join(" & ")}, Added ${addedNames.join(" & ")}. Active: ${activeNames.join(" & ")}`;
       }
 
-      isLoggingTransitionRef.current = true;
+      // Lock locally immediately
+      lastProcessedSignatureRef.current = currentSignature;
+
       const now = new Date();
+      // 15-second time bucket prevents multiple open tabs/devices from generating duplicate entries
+      const timeBucket = Math.floor(now.getTime() / 15000);
+      const docId = `EVT_${userChassis}_${eventType}_${currentSignature || "SAFE"}_${timeBucket}`;
 
       const record = {
-        timestampRaw: Date.now(),
-        date: now.toLocaleDateString(),
-        time: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        timestampRaw: now.getTime(),
+        date: formatEVDate(now),
+        time: formatEVTime(now),
         eventType: eventType,
         signature: currentSignature,
         chassis: userChassis,
@@ -263,24 +302,22 @@ export function TelemetryProvider({ children }) {
         label: transitionLabel,
         subsystem: diagnosis.affected_subsystem || "Main Powertrain",
         voltage: v.toFixed(2),
-        current: parseFloat(telemetry.Current ?? telemetry.current_amps ?? 0).toFixed(2),
+        current: parseFloat(tel?.Current ?? tel?.current_amps ?? 0).toFixed(2),
         temp: temp.toFixed(1),
-        rpm: Math.round(telemetry.motor_rpm ?? 0),
-        ambient_temp: parseFloat(telemetry.ambient_temp ?? 25.0).toFixed(1),
-        ambient_humidity: parseFloat(telemetry.ambient_humidity ?? 50.0).toFixed(0)
+        rpm: Math.round(tel?.motor_rpm ?? 0),
+        ambient_temp: parseFloat(tel?.ambient_temp ?? 25.0).toFixed(1),
+        ambient_humidity: parseFloat(tel?.ambient_humidity ?? 50.0).toFixed(0)
       };
 
-      const incidentsRef = collection(db, "users", currentUser.uid, "fault_history");
-      addDoc(incidentsRef, record)
-        .catch((e) => console.error("Error logging state transition:", e))
-        .finally(() => {
-          setTimeout(() => { isLoggingTransitionRef.current = false; }, 2000);
-        });
+      const docRef = doc(db, "users", currentUser.uid, "fault_history", docId);
+      setDoc(docRef, record, { merge: true }).catch((e) =>
+        console.error("Error logging state transition:", e)
+      );
     }
-  }, [agentResult, telemetry, currentUser, isAdmin, userChassis, faultHistory]);
+  }, [agentResult, currentUser, isAdmin, userChassis, faultHistory]);
 
   const updateRollingHistory = (newTel) => {
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const timeStr = formatEVTime(new Date());
     setHistory((prev) => {
       const point = {
         time: timeStr,
@@ -337,7 +374,6 @@ export function TelemetryProvider({ children }) {
     let ws = null;
     let fallbackInterval = null;
 
-    // Convert https:// -> wss:// and http:// -> ws:// dynamically
     const wsProtocol = API_BASE.startsWith("https") ? "wss" : "ws";
     const cleanHost = API_BASE.replace(/^https?:\/\//, "");
     const chassisWsUrl = `${wsProtocol}://${cleanHost}/ws/telemetry/${userChassis}`;
