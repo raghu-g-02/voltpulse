@@ -13,20 +13,42 @@ FAULT_NAME_MAP = {
     3: "Critical Battery Thermal Overheat",
 }
 
+DEFAULT_DEMO_CALIBRATION = {
+    "modelName": "5V TT-Motor Testbench",
+    "manufacturer": "Benchtop Laboratory",
+    "voltage_nominal": 5.0,
+    "voltage_sag_limit": 4.2,
+    "current_nominal": 0.25,
+    "current_overload_limit": 0.95,
+    "temp_nominal": 27.0,
+    "temp_critical_limit": 42.0,
+    "rpm_max_rated": 250,
+}
+
 class PredictiveDiagnosticAgent:
     """
-    Evaluates multi-channel telemetry using XGBoost and multi-fault physical rules.
-    Detects single faults, compound simultaneous faults, and fault-to-fault escalations.
+    Evaluates multi-channel telemetry against model-specific calibration envelopes.
+    Converts raw physical readings into normalized stress ratios (0.0 to 1.0+ scale)
+    so small testbench motors and high-voltage production EVs share the exact same AI engine.
     """
 
-    def diagnose(self, telemetry: dict) -> dict:
+    def diagnose(self, telemetry: dict, model_calibration: dict = None) -> dict:
         v = float(telemetry.get("Voltage", telemetry.get("bus_voltage", 0.0)))
         i = float(telemetry.get("Current", telemetry.get("current_amps", 0.0)))
         t = float(telemetry.get("Temperature", telemetry.get("motor_temp", 0.0)))
         rpm = float(telemetry.get("motor_rpm", 0.0))
         chassis = telemetry.get("chassis", "UNKNOWN_CHASSIS")
 
-        # COLD-BOOT / ZERO-DATA GUARD: Prevents phantom faults on uninitialized hardware
+        limits = model_calibration if model_calibration and isinstance(model_calibration, dict) else DEFAULT_DEMO_CALIBRATION
+
+        v_nom = float(limits.get("voltage_nominal", 5.0))
+        v_sag = float(limits.get("voltage_sag_limit", 4.2))
+        i_crit = float(limits.get("current_overload_limit", 0.95))
+        t_crit = float(limits.get("temp_critical_limit", 42.0))
+        rpm_max = float(limits.get("rpm_max_rated", 250))
+        model_name = limits.get("modelName", "Generic EV Model")
+
+        # Cold-boot / standby guard
         if v <= 0.5 and t <= 1.0:
             return {
                 "fault_class": 0,
@@ -40,6 +62,13 @@ class PredictiveDiagnosticAgent:
                 "asil_rating": "QM",
                 "hazard_description": "Vehicle telemetry unit in standby / hardware initializing.",
                 "dtc_code": "DTC-SYS-000",
+                "model_applied": model_name,
+                "normalized_stress": {
+                    "voltage_sag": 0.0,
+                    "current_load": 0.0,
+                    "thermal_load": 0.0,
+                    "rpm_load": 0.0,
+                },
                 "freeze_frame": {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "trigger_dtc": "DTC-SYS-000",
@@ -51,15 +80,20 @@ class PredictiveDiagnosticAgent:
                 },
             }
 
-        ml_result = diagnostic_engine.predict(telemetry)
-        ml_fault_class = ml_result["fault_class"]
+        # Normalized stress ratios (0.0 to 1.0+ scale)
+        norm_v_sag = max(0.0, (v_nom - v) / max(0.1, (v_nom - v_sag))) if v > 0.5 else 0.0
+        norm_i_overload = i / max(0.05, i_crit)
+        norm_t_overheat = t / max(1.0, t_crit)
+        norm_rpm = rpm / max(1.0, rpm_max)
 
-        # MULTI-FAULT PHYSICAL THRESHOLD & ML EVALUATION
+        ml_result = diagnostic_engine.predict(telemetry)
+        ml_fault_class = ml_result.get("fault_class", 0)
+
         active_fault_items = []
         fault_classes_detected = set()
 
-        # Fault 1: Motor Overload / Gearbox Drag
-        if i >= 2.5 or ml_fault_class == 1:
+        # Dynamic Fault 1: Motor Transmission Overload
+        if norm_i_overload >= 1.0 or ml_fault_class == 1:
             fault_classes_detected.add(1)
             active_fault_items.append({
                 "class": 1,
@@ -67,10 +101,11 @@ class PredictiveDiagnosticAgent:
                 "subsystem": "Drivetrain Mechanical Transmission",
                 "severity": "HIGH",
                 "dtc": "DTC-MECH-101",
+                "threshold_breach": f"{i:.2f}A >= {i_crit:.2f}A limit ({norm_i_overload*100:.0f}% of {model_name} max)",
             })
 
-        # Fault 2: Power Inverter Voltage Drop / Rail Sag
-        if (v < 3.0 and v > 0.5) or ml_fault_class == 2:
+        # Dynamic Fault 2: Inverter Electrical Voltage Sag
+        if (norm_v_sag >= 1.0 and v > 0.5) or ml_fault_class == 2:
             fault_classes_detected.add(2)
             active_fault_items.append({
                 "class": 2,
@@ -78,10 +113,11 @@ class PredictiveDiagnosticAgent:
                 "subsystem": "Power Inverter Electrical Rail",
                 "severity": "CRITICAL",
                 "dtc": "DTC-ELEC-202",
+                "threshold_breach": f"{v:.2f}V <= {v_sag:.2f}V limit (Stress {norm_v_sag*100:.0f}%)",
             })
 
-        # Fault 3: Battery Thermal Overheat
-        if t >= 60.0 or ml_fault_class == 3:
+        # Dynamic Fault 3: Battery Thermal Overheat
+        if norm_t_overheat >= 1.0 or ml_fault_class == 3:
             fault_classes_detected.add(3)
             active_fault_items.append({
                 "class": 3,
@@ -89,9 +125,9 @@ class PredictiveDiagnosticAgent:
                 "subsystem": "Main Battery Thermal Enclosure",
                 "severity": "EMERGENCY",
                 "dtc": "DTC-THERM-303",
+                "threshold_breach": f"{t:.1f}°C >= {t_crit:.1f}°C limit ({norm_t_overheat*100:.0f}% thermal cap)",
             })
 
-        # Aggregate status
         if not active_fault_items:
             fault_classes_detected.add(0)
             primary_class = 0
@@ -100,7 +136,7 @@ class PredictiveDiagnosticAgent:
             primary_severity = "NOMINAL"
             primary_asil = "QM"
             primary_dtc = "DTC-SYS-000"
-            hazard_desc = "Operating within safe baseline parameters."
+            hazard_desc = f"Operating safely within calibrated {model_name} limits."
             active_count = 0
         else:
             active_count = len(active_fault_items)
@@ -109,16 +145,12 @@ class PredictiveDiagnosticAgent:
             labels_list = [item["label"] for item in active_fault_items]
             subsystems_list = list(set([item["subsystem"] for item in active_fault_items]))
 
-            if active_count > 1:
-                composite_label = f"Multiple Faults ({active_count} Active): " + " & ".join(labels_list)
-            else:
-                composite_label = active_fault_items[0]["label"]
-
+            composite_label = f"Multiple Faults ({active_count} Active): " + " & ".join(labels_list) if active_count > 1 else active_fault_items[0]["label"]
             combined_subsystem = ", ".join(subsystems_list)
             primary_severity = "EMERGENCY" if 3 in fault_classes_detected else ("CRITICAL" if 2 in fault_classes_detected else "HIGH")
             primary_asil = "ASIL-D" if 3 in fault_classes_detected else ("ASIL-C" if 2 in fault_classes_detected else "ASIL-B")
             primary_dtc = active_fault_items[0]["dtc"]
-            hazard_desc = f"Simultaneous powertrain hazards detected across {active_count} subsystem(s)."
+            hazard_desc = f"Hazards active across {active_count} subsystem(s) for vehicle model {model_name}."
 
         freeze_frame = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -142,12 +174,19 @@ class PredictiveDiagnosticAgent:
             "affected_subsystem": combined_subsystem,
             "asil_rating": primary_asil,
             "hazard_description": hazard_desc,
+            "model_applied": model_name,
+            "normalized_stress": {
+                "voltage_sag": round(norm_v_sag, 2),
+                "current_load": round(norm_i_overload, 2),
+                "thermal_load": round(norm_t_overheat, 2),
+                "rpm_load": round(norm_rpm, 2),
+            },
             "freeze_frame": freeze_frame,
         }
 
 
 class AutonomousOutreachAgent:
-    """Generates natural voice advisories and background notifications for single, compounding, and clearing faults."""
+    """Generates natural voice advisories and dispatches vehicle alerts."""
 
     def __init__(self):
         self.last_email_sent_times = {}
@@ -218,13 +257,13 @@ class AutonomousOutreachAgent:
         def _email_worker():
             try:
                 if len(fault_classes) > 1:
-                    subject = f"🚨 CRITICAL MULTI-FAULT ALERT: {len(fault_classes)} Powertrain Hazards Active on {chassis}"
+                    subject = f"🚨 CRITICAL MULTI-FAULT ALERT: {len(fault_classes)} Powertrain Hazards on {chassis}"
                 elif 3 in fault_classes:
-                    subject = f"🚨 URGENT: High Battery Temperature Detected on {chassis}"
+                    subject = f"🚨 URGENT: Battery Thermal Overheat on {chassis}"
                 elif 2 in fault_classes:
-                    subject = f"⚡ Caution: Power Inverter Voltage Drop on {chassis}"
+                    subject = f"⚡ Caution: Inverter Voltage Sag on {chassis}"
                 else:
-                    subject = f"⚠️ Action Recommended: Mechanical Gearbox Drag on {chassis}"
+                    subject = f"⚠️ Notice: Motor Transmission Drag on {chassis}"
 
                 v = raw_telemetry.get("Voltage", raw_telemetry.get("bus_voltage", 0.0))
                 i = raw_telemetry.get("Current", raw_telemetry.get("current_amps", 0.0))
@@ -233,7 +272,7 @@ class AutonomousOutreachAgent:
 
                 owner_name = active_owner.get("fullName", "Vehicle Owner")
                 vehicle_id = active_owner.get("vehicleId", "VEH-N/A")
-                vehicle_model = active_owner.get("vehicleModel", "Electric Vehicle")
+                model_name = diagnosis.get("model_applied", "Electric Vehicle")
 
                 html_body = f"""
                 <html>
@@ -248,17 +287,17 @@ class AutonomousOutreachAgent:
                         </p>
                       </div>
 
-                      <h4 style="color: #64748b; margin: 15px 0 8px 0; text-transform: uppercase; font-size: 11px;">Vehicle Profile:</h4>
+                      <h4 style="color: #64748b; margin: 15px 0 8px 0; text-transform: uppercase; font-size: 11px;">Vehicle Specification:</h4>
                       <table style="width: 100%; font-size: 13px; color: #334155; margin-bottom: 15px;">
                         <tr><td><strong>Chassis VIN:</strong></td><td style="color: #0284c7; font-weight: bold; font-family: monospace;">{chassis}</td></tr>
-                        <tr><td><strong>Vehicle ID:</strong></td><td>{vehicle_id}</td></tr>
-                        <tr><td><strong>Vehicle Model:</strong></td><td>{vehicle_model}</td></tr>
+                        <tr><td><strong>Vehicle Plate / ID:</strong></td><td>{vehicle_id}</td></tr>
+                        <tr><td><strong>Vehicle Model:</strong></td><td style="color: #0d9488; font-weight: bold;">{model_name}</td></tr>
                         <tr><td><strong>Active State:</strong></td><td style="color: #e11d48; font-weight: bold;">{diagnosis.get('diagnosis_label')}</td></tr>
                       </table>
 
                       <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 15px 0;" />
                       
-                      <h4 style="color: #64748b; margin: 10px 0 8px 0; text-transform: uppercase; font-size: 11px;">Recorded Telemetry Snapshot:</h4>
+                      <h4 style="color: #64748b; margin: 10px 0 8px 0; text-transform: uppercase; font-size: 11px;">Telemetry Snapshot:</h4>
                       <table style="width: 100%; font-size: 13px; color: #334155;">
                         <tr><td><strong>Battery Voltage:</strong></td><td>{v:.2f} V</td></tr>
                         <tr><td><strong>Power Draw:</strong></td><td>{i:.2f} A</td></tr>
@@ -281,7 +320,7 @@ class AutonomousOutreachAgent:
                     server.login(SENDER_GMAIL, SENDER_APP_PASSWORD)
                     server.sendmail(SENDER_GMAIL, recipient_email, msg.as_string())
 
-                print(f"[Dynamic Alert] Email dispatched to {recipient_email} for Chassis {chassis} (Active Faults: {fault_classes})!")
+                print(f"[Alert] Email dispatched to {recipient_email} for Chassis {chassis} ({model_name})")
             except Exception as e:
                 print(f"[Email Error] Failed to send email to {recipient_email} ({chassis}): {e}")
 
@@ -318,7 +357,8 @@ class MasterOrchestratorAgent:
         if not active_owner:
             return None
 
-        diagnosis = self.diagnostic_agent.diagnose(raw_telemetry)
+        cal = active_owner.get("calibration", DEFAULT_DEMO_CALIBRATION)
+        diagnosis = self.diagnostic_agent.diagnose(raw_telemetry, model_calibration=cal)
         voice_script = self.outreach_agent.generate_human_voice_script(diagnosis, raw_telemetry)
 
         if diagnosis["fault_class"] != 0:

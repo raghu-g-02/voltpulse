@@ -1,13 +1,15 @@
-import asyncio
+import os
 import json
+import asyncio
 import requests
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from config import FIREBASE_DATABASE_URL
-from agents import orchestrator
+from typing import Optional, Dict, Any
 
-app = FastAPI(title="VoltPulse AI Multi-Tenant Concurrent Telematics Backend")
+from agents import orchestrator, DEFAULT_DEMO_CALIBRATION
+
+app = FastAPI(title="VoltPulse AI Multi-Tenant Concurrent Engine")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,242 +19,236 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory Multi-Tenant State Registry
-active_vehicles: dict[str, dict] = {}
+# Active sessions and model envelopes cache
+active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
+vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
+active_simulations: Dict[str, Dict[str, Any]] = {}
 
+FIREBASE_RTDB_BASE = os.getenv(
+    "FIREBASE_DATABASE_URL", 
+    "https://major-pro-8b1c9-default-rtdb.firebaseio.com"
+).rstrip("/")
 
-class OwnerSessionPayload(BaseModel):
+class SessionBindRequest(BaseModel):
     userId: str
     vehicleId: str
     vehicleModel: str
     email: str
     fullName: str
     chassisNumber: str
+    calibration: Optional[Dict[str, Any]] = None
 
-
-class UnbindPayload(BaseModel):
+class SessionUnbindRequest(BaseModel):
     chassisNumber: str
 
-
-def safe_float(val, default=0.0):
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-
-def get_default_vehicle_state(chassis: str) -> dict:
-    return {
-        "telemetry": {
-            "chassis": chassis,
-            "Voltage": 0.0,
-            "Current": 0.0,
-            "Temperature": 0.0,
-            "motor_rpm": 0.0,
-            "vibration_x": 0.05,
-            "vibration_y": 0.08,
-            "vibration_z": 9.82,
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-        },
-        "agent_result": None,
-        "owner": None,
-        "source": "STANDBY_OFFLINE",
-    }
-
-
-def fetch_live_chassis_telemetry(chassis_number: str) -> dict:
-    """Dynamically fetches real-time telemetry from /{chassis_number}.json in Firebase RTDB."""
-    if not chassis_number:
-        return None
-    try:
-        clean_chassis = chassis_number.strip().upper()
-        url = f"{FIREBASE_DATABASE_URL.rstrip('/')}/{clean_chassis}.json"
-        res = requests.get(url, timeout=2.0)
-
-        if res.status_code == 200 and res.json():
-            data = res.json()
-            if isinstance(data, dict):
-                return {
-                    "chassis": clean_chassis,
-                    "Voltage": safe_float(data.get("Voltage", data.get("voltage")), 0.0),
-                    "Current": safe_float(data.get("Current", data.get("current")), 0.0),
-                    "Temperature": safe_float(data.get("Temperature", data.get("temperature")), 25.0),
-                    "motor_rpm": safe_float(data.get("motor_rpm", data.get("rpm")), 0.0),
-                    "vibration_x": safe_float(data.get("vibration_x"), 0.05),
-                    "vibration_y": safe_float(data.get("vibration_y"), 0.08),
-                    "vibration_z": safe_float(data.get("vibration_z"), 9.82),
-                    "ambient_temp": safe_float(data.get("ambient_temp"), 25.0),
-                    "ambient_humidity": safe_float(data.get("ambient_humidity"), 50.0),
-                }
-    except Exception as e:
-        print(f"[Firebase Multi-Tenant Fetch Error ({chassis_number})]: {e}")
-    return None
-
+class ModelSyncRequest(BaseModel):
+    modelId: str
+    modelData: Dict[str, Any]
 
 @app.get("/")
-def root():
+def read_root():
     return {
         "system": "VoltPulse AI Multi-Tenant Concurrent Engine",
-        "active_vehicle_sessions": list(active_vehicles.keys()),
-        "total_active_sessions": len(active_vehicles),
+        "active_vehicle_sessions": list(active_vehicle_sessions.keys()),
+        "cached_models": list(vehicle_models_catalog.keys()),
+        "total_active_sessions": len(active_vehicle_sessions),
     }
-
-
-@app.get("/api/state/latest/{chassis_number}")
-def get_latest_state(chassis_number: str):
-    clean_chassis = chassis_number.strip().upper()
-    v_state = active_vehicles.get(clean_chassis)
-    if not v_state:
-        v_state = get_default_vehicle_state(clean_chassis)
-        active_vehicles[clean_chassis] = v_state
-
-    if v_state.get("owner") and v_state.get("agent_result") is None:
-        v_state["agent_result"] = orchestrator.process_telemetry(
-            v_state["telemetry"], v_state["owner"]
-        )
-    return v_state
-
-
-@app.get("/api/telemetry/{chassis_number}")
-def get_specific_chassis_telemetry(chassis_number: str):
-    """Admin inspect endpoint: reads live telemetry from Firebase for any requested vehicle."""
-    clean_chassis = chassis_number.strip().upper()
-    data = fetch_live_chassis_telemetry(clean_chassis)
-    if data:
-        return {"status": "ONLINE", "telemetry": data}
-
-    v_state = active_vehicles.get(clean_chassis)
-    if v_state and v_state["telemetry"]["Voltage"] > 0:
-        return {"status": "ONLINE_CACHED", "telemetry": v_state["telemetry"]}
-
-    return {
-        "status": "OFFLINE_STANDBY",
-        "telemetry": {
-            "chassis": clean_chassis,
-            "Voltage": 0.0,
-            "Current": 0.0,
-            "Temperature": 0.0,
-            "motor_rpm": 0.0,
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-        },
-    }
-
 
 @app.post("/api/session/bind")
-def bind_owner_session(payload: OwnerSessionPayload):
-    """Dynamically binds an individual user session to their registered vehicle chassis."""
-    clean_chassis = payload.chassisNumber.strip().upper()
-
-    if clean_chassis not in active_vehicles:
-        active_vehicles[clean_chassis] = get_default_vehicle_state(clean_chassis)
-
-    v_state = active_vehicles[clean_chassis]
-    v_state["owner"] = payload.model_dump()
-    v_state["source"] = f"LIVE_SESSION_{clean_chassis}"
-
-    # Immediately fetch fresh Firebase state
-    fresh_telemetry = fetch_live_chassis_telemetry(clean_chassis)
-    if fresh_telemetry:
-        v_state["telemetry"] = fresh_telemetry
-        v_state["agent_result"] = orchestrator.process_telemetry(
-            fresh_telemetry, v_state["owner"]
-        )
-
-    print(f"\n[MULTI-TENANT BOUND] Owner '{payload.fullName}' ({payload.email}) linked to Chassis '{clean_chassis}'")
-    print(f"Total concurrent vehicle sessions: {len(active_vehicles)}")
-
-    return {
-        "status": "BOUND_SUCCESSFULLY",
-        "active_chassis": clean_chassis,
-        "owner": v_state["owner"],
+def bind_session(req: SessionBindRequest):
+    chassis = req.chassisNumber.strip().upper()
+    
+    # Resolve calibration: either directly provided, from catalog, or fallback to demo
+    cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_DEMO_CALIBRATION
+    
+    active_vehicle_sessions[chassis] = {
+        "userId": req.userId,
+        "vehicleId": req.vehicleId,
+        "vehicleModel": req.vehicleModel,
+        "email": req.email,
+        "fullName": req.fullName,
+        "chassisNumber": chassis,
+        "calibration": cal,
     }
-
+    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel}")
+    return {"status": "SUCCESS", "chassis": chassis, "calibration": cal}
 
 @app.post("/api/session/unbind")
-def unbind_owner_session(payload: UnbindPayload):
-    clean_chassis = payload.chassisNumber.strip().upper()
-    if clean_chassis in active_vehicles:
-        active_vehicles[clean_chassis]["owner"] = None
-        active_vehicles[clean_chassis]["source"] = "STANDBY_OFFLINE"
-        active_vehicles[clean_chassis]["agent_result"] = None
-        print(f"\n[MULTI-TENANT UNBOUND] Session for Chassis '{clean_chassis}' disconnected.")
-    return {"status": "UNBOUND_SUCCESSFULLY", "chassis": clean_chassis}
+def unbind_session(req: SessionUnbindRequest):
+    chassis = req.chassisNumber.strip().upper()
+    if chassis in active_vehicle_sessions:
+        del active_vehicle_sessions[chassis]
+        print(f"[Session Unbound] Chassis: {chassis}")
+    return {"status": "SUCCESS", "chassis": chassis}
 
+@app.post("/api/models/sync")
+def sync_model(req: ModelSyncRequest):
+    vehicle_models_catalog[req.modelId] = req.modelData
+    # Update all active vehicle sessions assigned to this model in real time
+    updated_chassis = []
+    for c, sess in active_vehicle_sessions.items():
+        if sess.get("vehicleModel") == req.modelData.get("modelName") or sess.get("vehicleModel") == req.modelId:
+            sess["calibration"] = req.modelData
+            updated_chassis.append(c)
 
-@app.post("/api/simulate/{chassis_number}/{fault_class}")
-def simulate_fault_for_chassis(chassis_number: str, fault_class: int):
-    clean_chassis = chassis_number.strip().upper()
-    presets = {
-        0: {"Voltage": 4.35, "Current": 1.20, "motor_rpm": 230.0, "Temperature": 28.0, "vibration_x": 0.05, "vibration_y": 0.08, "vibration_z": 9.82, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-        1: {"Voltage": 4.20, "Current": 2.80, "motor_rpm": 60.0, "Temperature": 34.0, "vibration_x": 14.5, "vibration_y": 12.2, "vibration_z": 9.81, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-        2: {"Voltage": 2.50, "Current": 0.35, "motor_rpm": 140.0, "Temperature": 30.0, "vibration_x": 0.15, "vibration_y": 0.20, "vibration_z": 9.81, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-        3: {"Voltage": 1.70, "Current": 1.95, "motor_rpm": 170.0, "Temperature": 68.5, "vibration_x": 0.25, "vibration_y": 0.30, "vibration_z": 9.81, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-        # Compound Simulation 4: Inverter Sag + Critical Thermal Overheat
-        4: {"Voltage": 2.20, "Current": 1.50, "motor_rpm": 110.0, "Temperature": 72.0, "vibration_x": 0.30, "vibration_y": 0.35, "vibration_z": 9.81, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-        # Compound Simulation 5: Motor Overload + Inverter Sag + Critical Thermal Overheat (Triple Fault)
-        5: {"Voltage": 2.10, "Current": 3.10, "motor_rpm": 45.0, "Temperature": 75.0, "vibration_x": 15.0, "vibration_y": 14.0, "vibration_z": 9.80, "ambient_temp": 25.0, "ambient_humidity": 50.0},
-    }
+    print(f"[Model Synced] {req.modelId} updated across active sessions: {updated_chassis}")
+    return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
-    if clean_chassis not in active_vehicles:
-        active_vehicles[clean_chassis] = get_default_vehicle_state(clean_chassis)
+def fetch_firebase_telemetry(chassis: str) -> dict:
+    url = f"{FIREBASE_RTDB_BASE}/{chassis}.json"
+    try:
+        resp = requests.get(url, timeout=2.0)
+        if resp.status_code == 200 and resp.json():
+            data = resp.json()
+            return {
+                "Voltage": float(data.get("Voltage", data.get("voltage", 0.0))),
+                "Current": float(data.get("Current", data.get("current", 0.0))),
+                "Temperature": float(data.get("Temperature", data.get("temperature", 0.0))),
+                "motor_rpm": float(data.get("motor_rpm", data.get("rpm", 0.0))),
+                "ambient_temp": float(data.get("ambient_temp", 25.0)),
+                "ambient_humidity": float(data.get("ambient_humidity", 50.0)),
+                "chassis": chassis,
+            }
+    except Exception:
+        pass
 
-    v_state = active_vehicles[clean_chassis]
-    sim_data = presets.get(fault_class, presets[0]).copy()
-    sim_data["chassis"] = clean_chassis
-    v_state["telemetry"] = sim_data
-
-    if v_state.get("owner"):
-        v_state["agent_result"] = orchestrator.process_telemetry(
-            sim_data, v_state["owner"]
-        )
-
-    v_state["source"] = f"SIMULATION_CLASS_{fault_class}"
     return {
-        "status": "SUCCESS",
-        "chassis": clean_chassis,
-        "injected_fault": fault_class,
-        "state": v_state,
+        "Voltage": 0.0,
+        "Current": 0.0,
+        "Temperature": 0.0,
+        "motor_rpm": 0.0,
+        "ambient_temp": 25.0,
+        "ambient_humidity": 50.0,
+        "chassis": chassis,
     }
 
+@app.get("/api/telemetry/{chassis}")
+def get_telemetry(chassis: str):
+    c = chassis.strip().upper()
+    sim = active_simulations.get(c)
+    if sim:
+        return {"source": "SIMULATION", "telemetry": sim}
+    tel = fetch_firebase_telemetry(c)
+    return {"source": "FIREBASE_LIVE", "telemetry": tel}
 
-@app.post("/api/simulate/{fault_class}")
-def simulate_fault_fallback(fault_class: int):
-    target_chassis = list(active_vehicles.keys())[0] if active_vehicles else "DEFAULT_CHASSIS"
-    return simulate_fault_for_chassis(target_chassis, fault_class)
+@app.get("/api/state/latest/{chassis}")
+def get_latest_state(chassis: str):
+    c = chassis.strip().upper()
+    session = active_vehicle_sessions.get(c, {
+        "chassisNumber": c,
+        "email": "owner@voltpulse.io",
+        "fullName": "Vehicle Owner",
+        "calibration": DEFAULT_DEMO_CALIBRATION,
+    })
 
+    sim = active_simulations.get(c)
+    if sim:
+        raw_tel = sim
+        src = "SIMULATION"
+    else:
+        raw_tel = fetch_firebase_telemetry(c)
+        src = "FIREBASE_LIVE"
 
-@app.websocket("/ws/telemetry/{chassis_number}")
-async def websocket_telemetry_stream_per_chassis(websocket: WebSocket, chassis_number: str):
-    """
-    Dedicated WebSocket per chassis. Runs an independent 2-second streaming
-    and ML diagnostic loop isolated strictly to this vehicle.
-    """
+    res = orchestrator.process_telemetry(raw_tel, session)
+    return {"source": src, "telemetry": raw_tel, "agent_result": res}
+
+@app.post("/api/simulate/{chassis}/{fault_class}")
+def simulate_fault(chassis: str, fault_class: int):
+    c = chassis.strip().upper()
+    session = active_vehicle_sessions.get(c, {
+        "chassisNumber": c,
+        "calibration": DEFAULT_DEMO_CALIBRATION,
+    })
+    cal = session.get("calibration", DEFAULT_DEMO_CALIBRATION)
+
+    v_nom = float(cal.get("voltage_nominal", 5.0))
+    v_sag = float(cal.get("voltage_sag_limit", 4.2))
+    i_crit = float(cal.get("current_overload_limit", 0.95))
+    t_crit = float(cal.get("temp_critical_limit", 42.0))
+    rpm_max = float(cal.get("rpm_max_rated", 250))
+
+    if fault_class == 0:
+        sim_data = {
+            "Voltage": v_nom,
+            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
+            "Temperature": 28.0,
+            "motor_rpm": round(rpm_max * 0.8),
+            "ambient_temp": 25.0,
+            "ambient_humidity": 50.0,
+            "chassis": c,
+        }
+    elif fault_class == 1:
+        sim_data = {
+            "Voltage": v_nom,
+            "Current": round(i_crit * 1.35, 2),
+            "Temperature": 32.0,
+            "motor_rpm": round(rpm_max * 0.45),
+            "ambient_temp": 25.0,
+            "ambient_humidity": 50.0,
+            "chassis": c,
+        }
+    elif fault_class == 2:
+        sim_data = {
+            "Voltage": round(v_sag * 0.80, 2),
+            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
+            "Temperature": 30.0,
+            "motor_rpm": round(rpm_max * 0.6),
+            "ambient_temp": 25.0,
+            "ambient_humidity": 50.0,
+            "chassis": c,
+        }
+    elif fault_class == 3:
+        sim_data = {
+            "Voltage": v_nom,
+            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
+            "Temperature": round(t_crit + 8.5, 1),
+            "motor_rpm": round(rpm_max * 0.5),
+            "ambient_temp": 25.0,
+            "ambient_humidity": 50.0,
+            "chassis": c,
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Invalid fault class (0-3)")
+
+    active_simulations[c] = sim_data
+    agent_res = orchestrator.process_telemetry(sim_data, session)
+    return {"status": "SUCCESS", "state": {"source": "SIMULATION", "telemetry": sim_data, "agent_result": agent_res}}
+
+@app.websocket("/ws/telemetry/{chassis}")
+async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
-    clean_chassis = chassis_number.strip().upper()
-
-    if clean_chassis not in active_vehicles:
-        active_vehicles[clean_chassis] = get_default_vehicle_state(clean_chassis)
+    c = chassis.strip().upper()
+    print(f"[WebSocket Connected] Chassis: {c}")
 
     try:
         while True:
-            v_state = active_vehicles[clean_chassis]
-            live_data = fetch_live_chassis_telemetry(clean_chassis)
+            session = active_vehicle_sessions.get(c, {
+                "chassisNumber": c,
+                "email": "owner@voltpulse.io",
+                "fullName": "Vehicle Owner",
+                "calibration": DEFAULT_DEMO_CALIBRATION,
+            })
 
-            if live_data:
-                v_state["telemetry"] = live_data
-                if v_state.get("owner"):
-                    v_state["agent_result"] = orchestrator.process_telemetry(
-                        live_data, v_state["owner"]
-                    )
-                v_state["source"] = f"LIVE_FIREBASE_{clean_chassis}"
-            elif v_state.get("owner") and v_state.get("agent_result") is None:
-                v_state["agent_result"] = orchestrator.process_telemetry(
-                    v_state["telemetry"], v_state["owner"]
-                )
+            sim = active_simulations.get(c)
+            if sim:
+                raw_tel = sim
+                src = "SIMULATION"
+            else:
+                raw_tel = fetch_firebase_telemetry(c)
+                src = "FIREBASE_LIVE"
 
-            await websocket.send_text(json.dumps(v_state))
+            agent_res = orchestrator.process_telemetry(raw_tel, session)
+
+            payload = {
+                "source": src,
+                "telemetry": raw_tel,
+                "agent_result": agent_res,
+                "calibration": session.get("calibration", DEFAULT_DEMO_CALIBRATION),
+            }
+
+            await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
-        pass
+        print(f"[WebSocket Disconnected] Chassis: {c}")
+    except Exception as e:
+        print(f"[WebSocket Error] {e}")
