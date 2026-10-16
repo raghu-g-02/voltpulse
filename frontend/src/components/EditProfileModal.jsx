@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { doc, updateDoc, collection, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
-import { Car, X, Check, Cpu, Phone, User, CheckCircle2, Factory } from "lucide-react";
+import { Car, X, Check, Cpu, Phone, User, CheckCircle2 } from "lucide-react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").replace(/\/$/, "");
 
@@ -13,17 +13,17 @@ export default function EditProfileModal({ isOpen, onClose }) {
   const [allModels, setAllModels] = useState([]);
   const [loadingModels, setLoadingModels] = useState(true);
 
-  // Form states
+  // Form inputs
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
-  const [selectedCompany, setSelectedCompany] = useState("");
+  const [selectedCompany, setSelectedCompany] = useState("Tata Motors");
   const [vehicleModel, setVehicleModel] = useState("");
   const [vehicleId, setVehicleId] = useState("");
   const [chassisNumber, setChassisNumber] = useState("");
   const [chassisNotice, setChassisNotice] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // 1. Fetch live models catalog from Firestore whenever modal opens
+  // 1. Fetch live models catalog from Firestore
   useEffect(() => {
     if (!isOpen) return;
 
@@ -35,35 +35,34 @@ export default function EditProfileModal({ isOpen, onClose }) {
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
         setAllModels(list);
 
-        // Populate initial profile values
         if (userProfile) {
           setFullName(userProfile.fullName || "");
           setPhone(userProfile.phone || "");
           setVehicleId(userProfile.vehicleId || "");
           setChassisNumber(userProfile.chassisNumber || "");
 
-          const initialCompany = userProfile.companyName || (list[0]?.manufacturer ?? "Tata Motors");
-          setSelectedCompany(initialCompany);
+          const userCompany = userProfile.companyName || "Tata Motors";
+          setSelectedCompany(userCompany);
 
-          // Find if user's current model exists under this company
-          const currentModelExists = list.some(
-            (m) =>
-              m.modelName?.trim().toLowerCase() === userProfile.vehicleModel?.trim().toLowerCase() &&
-              m.manufacturer?.trim().toLowerCase() === initialCompany?.trim().toLowerCase()
+          // Check if current user model exists under this company
+          const companyModels = list.filter(
+            (m) => (m.manufacturer || "").trim().toLowerCase() === userCompany.trim().toLowerCase()
           );
 
-          if (currentModelExists) {
-            setVehicleModel(userProfile.vehicleModel);
-          } else {
-            // Default to the first model of that company
-            const firstCompanyModel = list.find(
-              (m) => m.manufacturer?.trim().toLowerCase() === initialCompany?.trim().toLowerCase()
-            );
-            setVehicleModel(firstCompanyModel?.modelName || list[0]?.modelName || "");
+          const matchedModel = companyModels.find(
+            (m) => m.modelName?.trim().toLowerCase() === userProfile.vehicleModel?.trim().toLowerCase()
+          );
+
+          if (matchedModel) {
+            setVehicleModel(matchedModel.modelName);
+          } else if (companyModels.length > 0) {
+            setVehicleModel(companyModels[0].modelName);
+          } else if (list.length > 0) {
+            setVehicleModel(list[0].modelName);
           }
         }
       } catch (err) {
-        console.error("Error fetching vehicle models catalog:", err);
+        console.error("Error loading models catalog:", err);
       } finally {
         setLoadingModels(false);
       }
@@ -72,28 +71,28 @@ export default function EditProfileModal({ isOpen, onClose }) {
     fetchCatalog();
   }, [isOpen, userProfile]);
 
-  // 2. Extract unique manufacturers from Firestore
+  // 2. Extract unique companies from vehicle_models
   const availableCompanies = useMemo(() => {
     const set = new Set();
     allModels.forEach((m) => {
       if (m.manufacturer?.trim()) set.add(m.manufacturer.trim());
     });
-    return Array.from(set);
+    const arr = Array.from(set);
+    return arr.length > 0 ? arr : ["Tata Motors"];
   }, [allModels]);
 
   // 3. Filter models strictly by the selected company
   const filteredModels = useMemo(() => {
-    if (!selectedCompany) return allModels;
     return allModels.filter(
-      (m) => (m.manufacturer || "").trim().toLowerCase() === selectedCompany.trim().toLowerCase()
+      (m) => (m.manufacturer || "").trim().toLowerCase() === (selectedCompany || "").trim().toLowerCase()
     );
   }, [allModels, selectedCompany]);
 
-  // 4. Keep vehicleModel synchronized when company changes
+  // 4. Keep vehicleModel synced whenever selectedCompany changes
   useEffect(() => {
     if (filteredModels.length > 0) {
-      const match = filteredModels.find((m) => m.modelName === vehicleModel);
-      if (!match) {
+      const exists = filteredModels.some((m) => m.modelName === vehicleModel);
+      if (!exists) {
         setVehicleModel(filteredModels[0].modelName);
       }
     } else {
@@ -101,7 +100,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
     }
   }, [selectedCompany, filteredModels]);
 
-  // 5. Auto-detect company & model if entered Chassis matches an OEM VIN
+  // 5. Smart Chassis Auto-Detection
   const handleChassisChange = (rawChassis) => {
     const clean = rawChassis.toUpperCase();
     setChassisNumber(clean);
@@ -131,12 +130,11 @@ export default function EditProfileModal({ isOpen, onClose }) {
     if (!currentUser) return;
     setSaving(true);
 
-    // Resolve the full calibration envelope for the selected model
     const matchedModel = allModels.find(
       (m) =>
         m.modelName?.trim().toLowerCase() === vehicleModel?.trim().toLowerCase() &&
         (m.manufacturer || "").trim().toLowerCase() === selectedCompany.trim().toLowerCase()
-    ) || allModels.find((m) => m.modelName === vehicleModel) || allModels[0];
+    ) || allModels.find((m) => m.modelName === vehicleModel);
 
     const calibrationPayload = matchedModel
       ? {
@@ -163,11 +161,11 @@ export default function EditProfileModal({ isOpen, onClose }) {
     };
 
     try {
-      // 1. Update Firestore user document
+      // 1. Update Firestore user profile
       const userRef = doc(db, "users", currentUser.uid);
       await updateDoc(userRef, updatedProfile);
 
-      // 2. Sync updated model calibration directly with FastAPI backend session
+      // 2. Bind active session directly on FastAPI backend
       await fetch(`${API_BASE}/api/session/bind`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -177,14 +175,13 @@ export default function EditProfileModal({ isOpen, onClose }) {
           ...updatedProfile,
           model_envelope: calibrationPayload,
         }),
-      }).catch((err) => console.error("Session re-bind failed:", err));
+      }).catch((err) => console.error("Session rebind error:", err));
 
       setSaving(false);
       onClose();
-      // Reload page so TelemetryContext re-attaches to the new chassis & calibration
       window.location.reload();
     } catch (err) {
-      console.error("Error updating vehicle profile:", err);
+      console.error("Error saving profile:", err);
       alert("Failed to update profile. Please verify your connection.");
       setSaving(false);
     }
@@ -199,24 +196,18 @@ export default function EditProfileModal({ isOpen, onClose }) {
               <Car className="w-5 h-5" />
             </span>
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Edit Vehicle & Calibration Profile</h3>
+              <h3 className="text-sm font-bold text-slate-900">Edit Vehicle & Profile</h3>
               <p className="text-[11px] text-slate-400">Select model from manufacturer database</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
-          >
+          <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <form onSubmit={handleSave} className="space-y-3.5 text-xs">
-          {/* Owner Details */}
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-              Owner Full Name
-            </label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Owner Full Name</label>
             <div className="relative">
               <User className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
@@ -230,9 +221,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
           </div>
 
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-              Contact Phone
-            </label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Contact Phone</label>
             <div className="relative">
               <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
@@ -245,11 +234,9 @@ export default function EditProfileModal({ isOpen, onClose }) {
             </div>
           </div>
 
-          {/* Chassis VIN with Smart OEM Pre-registration Match */}
+          {/* Chassis input with auto-detection */}
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-              Chassis Number (VIN)
-            </label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Chassis Number (VIN)</label>
             <div className="relative">
               <Cpu className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
@@ -269,49 +256,35 @@ export default function EditProfileModal({ isOpen, onClose }) {
             )}
           </div>
 
-          {/* Filtered Company and Model Dropdowns */}
+          {/* Company and Model Selection */}
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-                Vehicle Company
-              </label>
-              <div className="relative">
-                <select
-                  disabled={loadingModels || availableCompanies.length === 0}
-                  value={selectedCompany}
-                  onChange={(e) => setSelectedCompany(e.target.value)}
-                  className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                >
-                  {availableCompanies.length === 0 ? (
-                    <option value="">No Companies</option>
-                  ) : (
-                    availableCompanies.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </div>
+              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Company</label>
+              <select
+                disabled={loadingModels || availableCompanies.length === 0}
+                value={selectedCompany}
+                onChange={(e) => setSelectedCompany(e.target.value)}
+                className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
+              >
+                {availableCompanies.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
             </div>
 
             <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-                Vehicle Model
-              </label>
+              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Model Variant</label>
               <select
                 disabled={loadingModels || filteredModels.length === 0}
                 value={vehicleModel}
                 onChange={(e) => setVehicleModel(e.target.value)}
-                className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-cyan-800 focus:bg-white focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-cyan-800 focus:bg-white focus:outline-none focus:border-cyan-500"
               >
                 {filteredModels.length === 0 ? (
-                  <option value="">No models for this company</option>
+                  <option value="">No models registered</option>
                 ) : (
                   filteredModels.map((m) => (
-                    <option key={m.id} value={m.modelName}>
-                      {m.modelName}
-                    </option>
+                    <option key={m.id} value={m.modelName}>{m.modelName}</option>
                   ))
                 )}
               </select>
@@ -319,13 +292,11 @@ export default function EditProfileModal({ isOpen, onClose }) {
           </div>
 
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
-              Vehicle Plate / Identifier
-            </label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Plate / Vehicle ID</label>
             <input
               type="text"
               required
-              placeholder="KA-05-EV-1234"
+              placeholder="VEH-A23456"
               value={vehicleId}
               onChange={(e) => setVehicleId(e.target.value)}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
@@ -336,7 +307,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 transition"
+              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50"
             >
               Cancel
             </button>

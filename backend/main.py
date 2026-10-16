@@ -19,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Active sessions and model envelopes cache
 active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
 vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
@@ -33,6 +32,7 @@ class SessionBindRequest(BaseModel):
     userId: str
     vehicleId: str
     vehicleModel: str
+    companyName: Optional[str] = None
     email: str
     fullName: str
     chassisNumber: str
@@ -58,19 +58,20 @@ def read_root():
 def bind_session(req: SessionBindRequest):
     chassis = req.chassisNumber.strip().upper()
     
-    # Resolve calibration: either directly provided, from catalog, or fallback to demo
+    # 1. Resolve calibration: either directly provided, from catalog, or fallback
     cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_DEMO_CALIBRATION
     
     active_vehicle_sessions[chassis] = {
         "userId": req.userId,
         "vehicleId": req.vehicleId,
         "vehicleModel": req.vehicleModel,
+        "companyName": req.companyName or "Tata Motors",
         "email": req.email,
         "fullName": req.fullName,
         "chassisNumber": chassis,
         "calibration": cal,
     }
-    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel}")
+    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel} ({cal.get('voltage_nominal')}V / {cal.get('current_overload_limit')}A)")
     return {"status": "SUCCESS", "chassis": chassis, "calibration": cal}
 
 @app.post("/api/session/unbind")
@@ -84,34 +85,73 @@ def unbind_session(req: SessionUnbindRequest):
 @app.post("/api/models/sync")
 def sync_model(req: ModelSyncRequest):
     vehicle_models_catalog[req.modelId] = req.modelData
-    # Update all active vehicle sessions assigned to this model in real time
     updated_chassis = []
     for c, sess in active_vehicle_sessions.items():
-        if sess.get("vehicleModel") == req.modelData.get("modelName") or sess.get("vehicleModel") == req.modelId:
+        if (
+            sess.get("vehicleModel", "").strip().lower() == req.modelData.get("modelName", "").strip().lower()
+            or sess.get("vehicleModel") == req.modelId
+        ):
             sess["calibration"] = req.modelData
             updated_chassis.append(c)
 
     print(f"[Model Synced] {req.modelId} updated across active sessions: {updated_chassis}")
     return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
-def fetch_firebase_telemetry(chassis: str) -> dict:
-    url = f"{FIREBASE_RTDB_BASE}/{chassis}.json"
-    try:
-        resp = requests.get(url, timeout=2.0)
-        if resp.status_code == 200 and resp.json():
-            data = resp.json()
+def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
+    """Extracts sensor values handling any nesting or key-casing."""
+    if not isinstance(data, dict):
+        return None
+
+    # If nested under chassis key or telemetry key
+    if chassis in data and isinstance(data[chassis], dict):
+        data = data[chassis]
+    elif "telemetry" in data and isinstance(data["telemetry"], dict):
+        data = data["telemetry"]
+
+    # Normalize all dictionary keys to lowercase for foolproof lookup
+    lower_map = {str(k).lower(): v for k, v in data.items() if not isinstance(v, (dict, list))}
+
+    # Check for voltage field
+    v_raw = lower_map.get("voltage", lower_map.get("bus_voltage", None))
+    if v_raw is not None:
+        try:
             return {
-                "Voltage": float(data.get("Voltage", data.get("voltage", 0.0))),
-                "Current": float(data.get("Current", data.get("current", 0.0))),
-                "Temperature": float(data.get("Temperature", data.get("temperature", 0.0))),
-                "motor_rpm": float(data.get("motor_rpm", data.get("rpm", 0.0))),
-                "ambient_temp": float(data.get("ambient_temp", 25.0)),
-                "ambient_humidity": float(data.get("ambient_humidity", 50.0)),
+                "Voltage": float(v_raw),
+                "Current": float(lower_map.get("current", lower_map.get("current_amps", 0.0))),
+                "Temperature": float(lower_map.get("temperature", lower_map.get("temp", lower_map.get("motor_temp", 0.0)))),
+                "motor_rpm": float(lower_map.get("motor_rpm", lower_map.get("rpm", 0.0))),
+                "ambient_temp": float(lower_map.get("ambient_temp", 25.0)),
+                "ambient_humidity": float(lower_map.get("ambient_humidity", 50.0)),
+                "vibration_x": float(lower_map.get("vibration_x", 0.05)),
+                "vibration_y": float(lower_map.get("vibration_y", 0.08)),
+                "vibration_z": float(lower_map.get("vibration_z", 9.82)),
                 "chassis": chassis,
             }
-    except Exception:
-        pass
+        except (ValueError, TypeError):
+            pass
+    return None
 
+def fetch_firebase_telemetry(chassis: str) -> dict:
+    """Multi-tier Firebase RTDB reader: checks /{chassis}, /telemetry, and root /."""
+    lookup_paths = [
+        f"/{chassis}.json",
+        f"/telemetry/{chassis}.json",
+        f"/telemetry.json",
+        f"/.json"
+    ]
+
+    for path in lookup_paths:
+        url = f"{FIREBASE_RTDB_BASE}{path}"
+        try:
+            resp = requests.get(url, timeout=2.0)
+            if resp.status_code == 200 and resp.json():
+                extracted = _extract_telemetry_fields(resp.json(), chassis)
+                if extracted and extracted["Voltage"] > 0:
+                    return extracted
+        except Exception:
+            continue
+
+    # Fallback if hardware bench is offline/initializing
     return {
         "Voltage": 0.0,
         "Current": 0.0,
@@ -119,6 +159,9 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
         "motor_rpm": 0.0,
         "ambient_temp": 25.0,
         "ambient_humidity": 50.0,
+        "vibration_x": 0.05,
+        "vibration_y": 0.08,
+        "vibration_z": 9.82,
         "chassis": chassis,
     }
 
@@ -127,9 +170,9 @@ def get_telemetry(chassis: str):
     c = chassis.strip().upper()
     sim = active_simulations.get(c)
     if sim:
-        return {"source": "SIMULATION", "telemetry": sim}
+        return {"source": f"SIMULATION_{c}", "telemetry": sim}
     tel = fetch_firebase_telemetry(c)
-    return {"source": "FIREBASE_LIVE", "telemetry": tel}
+    return {"source": f"FIREBASE_LIVE_{c}", "telemetry": tel}
 
 @app.get("/api/state/latest/{chassis}")
 def get_latest_state(chassis: str):
@@ -144,10 +187,10 @@ def get_latest_state(chassis: str):
     sim = active_simulations.get(c)
     if sim:
         raw_tel = sim
-        src = "SIMULATION"
+        src = f"SIMULATION_{c}"
     else:
         raw_tel = fetch_firebase_telemetry(c)
-        src = "FIREBASE_LIVE"
+        src = f"FIREBASE_LIVE_{c}"
 
     res = orchestrator.process_telemetry(raw_tel, session)
     return {"source": src, "telemetry": raw_tel, "agent_result": res}
@@ -175,6 +218,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "motor_rpm": round(rpm_max * 0.8),
             "ambient_temp": 25.0,
             "ambient_humidity": 50.0,
+            "vibration_x": 0.05,
+            "vibration_y": 0.08,
+            "vibration_z": 9.82,
             "chassis": c,
         }
     elif fault_class == 1:
@@ -185,6 +231,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "motor_rpm": round(rpm_max * 0.45),
             "ambient_temp": 25.0,
             "ambient_humidity": 50.0,
+            "vibration_x": 0.25,
+            "vibration_y": 0.40,
+            "vibration_z": 9.82,
             "chassis": c,
         }
     elif fault_class == 2:
@@ -195,6 +244,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "motor_rpm": round(rpm_max * 0.6),
             "ambient_temp": 25.0,
             "ambient_humidity": 50.0,
+            "vibration_x": 0.05,
+            "vibration_y": 0.08,
+            "vibration_z": 9.82,
             "chassis": c,
         }
     elif fault_class == 3:
@@ -205,6 +257,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "motor_rpm": round(rpm_max * 0.5),
             "ambient_temp": 25.0,
             "ambient_humidity": 50.0,
+            "vibration_x": 0.05,
+            "vibration_y": 0.08,
+            "vibration_z": 9.82,
             "chassis": c,
         }
     else:
@@ -212,7 +267,7 @@ def simulate_fault(chassis: str, fault_class: int):
 
     active_simulations[c] = sim_data
     agent_res = orchestrator.process_telemetry(sim_data, session)
-    return {"status": "SUCCESS", "state": {"source": "SIMULATION", "telemetry": sim_data, "agent_result": agent_res}}
+    return {"status": "SUCCESS", "state": {"source": f"SIMULATION_{c}", "telemetry": sim_data, "agent_result": agent_res}}
 
 @app.websocket("/ws/telemetry/{chassis}")
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
@@ -232,10 +287,10 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
             sim = active_simulations.get(c)
             if sim:
                 raw_tel = sim
-                src = "SIMULATION"
+                src = f"SIMULATION_{c}"
             else:
                 raw_tel = fetch_firebase_telemetry(c)
-                src = "FIREBASE_LIVE"
+                src = f"FIREBASE_LIVE_{c}"
 
             agent_res = orchestrator.process_telemetry(raw_tel, session)
 
