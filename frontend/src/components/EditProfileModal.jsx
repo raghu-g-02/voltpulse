@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { doc, updateDoc, collection, getDocs } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
-import { Car, X, Check, Cpu, Phone, User, CheckCircle2 } from "lucide-react";
+import { Car, X, Check, Cpu, Phone, User, CheckCircle2, Factory } from "lucide-react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").replace(/\/$/, "");
 
@@ -13,17 +13,17 @@ export default function EditProfileModal({ isOpen, onClose }) {
   const [allModels, setAllModels] = useState([]);
   const [loadingModels, setLoadingModels] = useState(true);
 
-  // Form inputs
+  // Form states
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
-  const [selectedCompany, setSelectedCompany] = useState("Tata Motors");
+  const [selectedCompany, setSelectedCompany] = useState("");
   const [vehicleModel, setVehicleModel] = useState("");
   const [vehicleId, setVehicleId] = useState("");
   const [chassisNumber, setChassisNumber] = useState("");
   const [chassisNotice, setChassisNotice] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // 1. Fetch live models catalog from Firestore
+  // 1. Fetch live vehicle_models catalog from Firestore
   useEffect(() => {
     if (!isOpen) return;
 
@@ -32,37 +32,75 @@ export default function EditProfileModal({ isOpen, onClose }) {
       try {
         const snap = await getDocs(collection(db, "vehicle_models"));
         const list = [];
-        snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        snap.forEach((docSnap) => {
+          const data = docSnap.data();
+          list.push({
+            id: docSnap.id,
+            modelName: data.modelName || data.model || data.name || docSnap.id,
+            manufacturer: data.manufacturer || data.companyName || data.company || "Tata Motors",
+            voltage_nominal: data.voltage_nominal ?? 3.5,
+            voltage_sag_limit: data.voltage_sag_limit ?? 6.0,
+            current_nominal: data.current_nominal ?? 0.25,
+            current_overload_limit: data.current_overload_limit ?? 1.1,
+            temp_nominal: data.temp_nominal ?? 25.0,
+            temp_critical_limit: data.temp_critical_limit ?? 30.0,
+            rpm_max_rated: data.rpm_max_rated ?? 250,
+            assignedChassis: Array.isArray(data.assignedChassis) ? data.assignedChassis : [],
+            ...data
+          });
+        });
+
         setAllModels(list);
 
+        // Populate owner profile fields
         if (userProfile) {
           setFullName(userProfile.fullName || "");
           setPhone(userProfile.phone || "");
           setVehicleId(userProfile.vehicleId || "");
-          setChassisNumber(userProfile.chassisNumber || "");
+          const currentChassis = (userProfile.chassisNumber || "").trim().toUpperCase();
+          setChassisNumber(currentChassis);
 
-          const userCompany = userProfile.companyName || "Tata Motors";
-          setSelectedCompany(userCompany);
-
-          // Check if current user model exists under this company
-          const companyModels = list.filter(
-            (m) => (m.manufacturer || "").trim().toLowerCase() === userCompany.trim().toLowerCase()
+          // Check if this chassis was pre-registered under an OEM model
+          const matchedByChassis = list.find((m) =>
+            Array.isArray(m.assignedChassis) &&
+            m.assignedChassis.some((c) => String(c).trim().toUpperCase() === currentChassis)
           );
 
-          const matchedModel = companyModels.find(
-            (m) => m.modelName?.trim().toLowerCase() === userProfile.vehicleModel?.trim().toLowerCase()
-          );
+          if (matchedByChassis) {
+            setSelectedCompany(matchedByChassis.manufacturer);
+            setVehicleModel(matchedByChassis.modelName);
+            setChassisNotice(`✓ Auto-detected: ${matchedByChassis.manufacturer} ${matchedByChassis.modelName}`);
+          } else {
+            // Flexible match for company name (e.g. "Tata" matches "Tata Motors")
+            const userComp = (userProfile.companyName || "").trim().toLowerCase();
+            const matchedComp = list.find((m) => {
+              const mComp = (m.manufacturer || "").trim().toLowerCase();
+              return mComp === userComp || mComp.includes(userComp) || userComp.includes(mComp);
+            });
 
-          if (matchedModel) {
-            setVehicleModel(matchedModel.modelName);
-          } else if (companyModels.length > 0) {
-            setVehicleModel(companyModels[0].modelName);
-          } else if (list.length > 0) {
-            setVehicleModel(list[0].modelName);
+            const resolvedCompany = matchedComp ? matchedComp.manufacturer : (list[0]?.manufacturer || "Tata Motors");
+            setSelectedCompany(resolvedCompany);
+
+            // Filter models for this company
+            const companyModels = list.filter(
+              (m) => (m.manufacturer || "").trim().toLowerCase() === resolvedCompany.trim().toLowerCase()
+            );
+
+            const matchedModel = companyModels.find(
+              (m) => m.modelName?.trim().toLowerCase() === (userProfile.vehicleModel || "").trim().toLowerCase()
+            );
+
+            if (matchedModel) {
+              setVehicleModel(matchedModel.modelName);
+            } else if (companyModels.length > 0) {
+              setVehicleModel(companyModels[0].modelName);
+            } else if (list.length > 0) {
+              setVehicleModel(list[0].modelName);
+            }
           }
         }
       } catch (err) {
-        console.error("Error loading models catalog:", err);
+        console.error("Error loading models catalog from Firestore:", err);
       } finally {
         setLoadingModels(false);
       }
@@ -71,53 +109,63 @@ export default function EditProfileModal({ isOpen, onClose }) {
     fetchCatalog();
   }, [isOpen, userProfile]);
 
-  // 2. Extract unique companies from vehicle_models
+  // 2. Extract distinct companies directly from Firestore models
   const availableCompanies = useMemo(() => {
-    const set = new Set();
+    const compSet = new Set();
     allModels.forEach((m) => {
-      if (m.manufacturer?.trim()) set.add(m.manufacturer.trim());
+      if (m.manufacturer && m.manufacturer.trim()) {
+        compSet.add(m.manufacturer.trim());
+      }
     });
-    const arr = Array.from(set);
-    return arr.length > 0 ? arr : ["Tata Motors"];
+    const result = Array.from(compSet);
+    return result.length > 0 ? result : ["Tata Motors"];
   }, [allModels]);
 
-  // 3. Filter models strictly by the selected company
+  // 3. Filter models strictly by the selected company with fuzzy tolerance
   const filteredModels = useMemo(() => {
-    return allModels.filter(
-      (m) => (m.manufacturer || "").trim().toLowerCase() === (selectedCompany || "").trim().toLowerCase()
-    );
+    if (!selectedCompany) return allModels;
+    const normSelected = selectedCompany.trim().toLowerCase();
+
+    const matches = allModels.filter((m) => {
+      const normM = (m.manufacturer || "").trim().toLowerCase();
+      return normM === normSelected || normM.includes(normSelected) || normSelected.includes(normM);
+    });
+
+    // Fallback: If company filter yields nothing, show all models so the dropdown is never empty
+    return matches.length > 0 ? matches : allModels;
   }, [allModels, selectedCompany]);
 
   // 4. Keep vehicleModel synced whenever selectedCompany changes
   useEffect(() => {
     if (filteredModels.length > 0) {
-      const exists = filteredModels.some((m) => m.modelName === vehicleModel);
+      const exists = filteredModels.some(
+        (m) => m.modelName?.trim().toLowerCase() === vehicleModel?.trim().toLowerCase()
+      );
       if (!exists) {
         setVehicleModel(filteredModels[0].modelName);
       }
-    } else {
-      setVehicleModel("");
     }
   }, [selectedCompany, filteredModels]);
 
-  // 5. Smart Chassis Auto-Detection
+  // 5. Live VIN Auto-Detection
   const handleChassisChange = (rawChassis) => {
-    const clean = rawChassis.toUpperCase();
+    const clean = rawChassis.toUpperCase().trim();
     setChassisNumber(clean);
 
-    if (!clean.trim()) {
+    if (!clean) {
       setChassisNotice("");
       return;
     }
 
     const matched = allModels.find(
-      (m) => Array.isArray(m.assignedChassis) && m.assignedChassis.includes(clean)
+      (m) => Array.isArray(m.assignedChassis) &&
+             m.assignedChassis.some((c) => String(c).trim().toUpperCase() === clean)
     );
 
     if (matched) {
       setSelectedCompany(matched.manufacturer);
       setVehicleModel(matched.modelName);
-      setChassisNotice(`Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+      setChassisNotice(`✓ Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
     } else {
       setChassisNotice("");
     }
@@ -130,22 +178,24 @@ export default function EditProfileModal({ isOpen, onClose }) {
     if (!currentUser) return;
     setSaving(true);
 
+    // Find the exact calibration limits from the selected model
     const matchedModel = allModels.find(
       (m) =>
         m.modelName?.trim().toLowerCase() === vehicleModel?.trim().toLowerCase() &&
-        (m.manufacturer || "").trim().toLowerCase() === selectedCompany.trim().toLowerCase()
-    ) || allModels.find((m) => m.modelName === vehicleModel);
+        (m.manufacturer || "").trim().toLowerCase() === selectedCompany?.trim().toLowerCase()
+    ) || allModels.find((m) => m.modelName?.trim().toLowerCase() === vehicleModel?.trim().toLowerCase())
+      || allModels[0];
 
     const calibrationPayload = matchedModel
       ? {
           modelName: matchedModel.modelName,
           manufacturer: matchedModel.manufacturer,
-          voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 5.0,
-          voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 4.2,
+          voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 3.5,
+          voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 6.0,
           current_nominal: parseFloat(matchedModel.current_nominal) || 0.25,
-          current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 0.95,
-          temp_nominal: parseFloat(matchedModel.temp_nominal) || 27.0,
-          temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 42.0,
+          current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 1.1,
+          temp_nominal: parseFloat(matchedModel.temp_nominal) || 25.0,
+          temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 30.0,
           rpm_max_rated: parseFloat(matchedModel.rpm_max_rated) || 250,
         }
       : null;
@@ -165,7 +215,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
       const userRef = doc(db, "users", currentUser.uid);
       await updateDoc(userRef, updatedProfile);
 
-      // 2. Bind active session directly on FastAPI backend
+      // 2. Sync updated session directly to the backend
       await fetch(`${API_BASE}/api/session/bind`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -181,7 +231,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
       onClose();
       window.location.reload();
     } catch (err) {
-      console.error("Error saving profile:", err);
+      console.error("Error saving vehicle profile:", err);
       alert("Failed to update profile. Please verify your connection.");
       setSaving(false);
     }
@@ -196,11 +246,14 @@ export default function EditProfileModal({ isOpen, onClose }) {
               <Car className="w-5 h-5" />
             </span>
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Edit Vehicle & Profile</h3>
-              <p className="text-[11px] text-slate-400">Select model from manufacturer database</p>
+              <h3 className="text-sm font-bold text-slate-900">Edit Vehicle & Calibration Profile</h3>
+              <p className="text-[11px] text-slate-400">Linked to Firestore Manufacturer Database</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition">
+          <button
+            onClick={onClose}
+            className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -234,9 +287,11 @@ export default function EditProfileModal({ isOpen, onClose }) {
             </div>
           </div>
 
-          {/* Chassis input with auto-detection */}
+          {/* Chassis VIN with Real-Time OEM Match */}
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Chassis Number (VIN)</label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+              Chassis Number (VIN)
+            </label>
             <div className="relative">
               <Cpu className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
@@ -250,16 +305,18 @@ export default function EditProfileModal({ isOpen, onClose }) {
             </div>
             {chassisNotice && (
               <div className="mt-1 flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-200">
-                <CheckCircle2 className="w-3.5 h-3.5" />
+                <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
                 <span>{chassisNotice}</span>
               </div>
             )}
           </div>
 
-          {/* Company and Model Selection */}
+          {/* Company & Model Dropdowns */}
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Company</label>
+              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+                Company
+              </label>
               <select
                 disabled={loadingModels || availableCompanies.length === 0}
                 value={selectedCompany}
@@ -267,32 +324,36 @@ export default function EditProfileModal({ isOpen, onClose }) {
                 className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
               >
                 {availableCompanies.map((c) => (
-                  <option key={c} value={c}>{c}</option>
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
                 ))}
               </select>
             </div>
 
             <div>
-              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Model Variant</label>
+              <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+                Model Variant
+              </label>
               <select
                 disabled={loadingModels || filteredModels.length === 0}
                 value={vehicleModel}
                 onChange={(e) => setVehicleModel(e.target.value)}
                 className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-cyan-800 focus:bg-white focus:outline-none focus:border-cyan-500"
               >
-                {filteredModels.length === 0 ? (
-                  <option value="">No models registered</option>
-                ) : (
-                  filteredModels.map((m) => (
-                    <option key={m.id} value={m.modelName}>{m.modelName}</option>
-                  ))
-                )}
+                {filteredModels.map((m) => (
+                  <option key={m.id} value={m.modelName}>
+                    {m.modelName}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
 
           <div>
-            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Plate / Vehicle ID</label>
+            <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+              Vehicle Plate / ID
+            </label>
             <input
               type="text"
               required
@@ -307,7 +368,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50"
+              className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 transition"
             >
               Cancel
             </button>
