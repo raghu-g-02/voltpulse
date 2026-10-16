@@ -4,12 +4,12 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore"; // Import Firestore
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCbgYhbUbm2q9IQTLvmPTOX5upfKv6YrkI", // Replace with your actual web API key from Firebase Project Settings
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY, // Replace with your actual web API key from Firebase Project Settings
   authDomain: "major-pro-8b1c9.firebaseapp.com",
   projectId: "major-pro-8b1c9", // Firestore connects completely via your project ID
   storageBucket: "major-pro-8b1c9.appspot.com",
-  messagingSenderId: "147348529576", // Replace with your actual Sender ID
-  appId: "1:147348529576:web:d98924e985541c5e337d9d" // Replace with your actual App ID
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, // Replace with your actual Sender ID
+  appId: import.meta.env.VITE_FIREBASE_APP_ID // Replace with your actual App ID
 };
 
 // Initialize Firebase App
