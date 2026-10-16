@@ -1,0 +1,57 @@
+{
+    "model_name": "EV_Powertrain_Fault_Classifier_1111",
+    "dataset_balance": "1:1:1:1 (2000 samples per class)",
+    "model_file": "xgb_powertrain_classifier_1111.json",
+    "algorithm": "XGBoost",
+    "num_classes": 4,
+    "feature_order": [
+        "voltage",
+        "current",
+        "motor_speed_rpm",
+        "temperature",
+        "vibration_g",
+        "ambient_temp",
+        "humidity"
+    ],
+    "class_labels": {
+        "0": "Normal Operation",
+        "1": "Drivetrain / Motor Overload",
+        "2": "Inverter / Electrical Short Fault",
+        "3": "Critical Thermal Anomaly"
+    },
+    "bounds": {
+        "voltage": {
+            "min": 0.0,
+            "max": 0.9999999999999998
+        },
+        "current": {
+            "min": 0.0,
+            "max": 1.0000000000000002
+        },
+        "motor_speed_rpm": {
+            "min": 0.0,
+            "max": 0.999876797321605
+        },
+        "temperature": {
+            "min": 0.0,
+            "max": 1.0
+        },
+        "vibration_g": {
+            "min": 0.0,
+            "max": 1.0000000000000002
+        },
+        "ambient_temp": {
+            "min": 4.096477788240183e-05,
+            "max": 1.0
+        },
+        "humidity": {
+            "min": 0.0,
+            "max": 1.0
+        }
+    },
+    "performance": {
+        "macro_f1": 0.9875,
+        "balanced_accuracy": 0.9875,
+        "global_accuracy": 0.9875
+    }
+}
