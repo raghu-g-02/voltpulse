@@ -1,3 +1,4 @@
+# backend/main.py
 import os
 import json
 import asyncio
@@ -23,9 +24,10 @@ active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
 vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
 
+# Exact Singapore regional endpoint from Firebase Console
 FIREBASE_RTDB_BASE = os.getenv(
     "FIREBASE_DATABASE_URL", 
-    "https://major-pro-8b1c9-default-rtdb.firebaseio.com"
+    "https://major-pro-8b1c9-default-rtdb.asia-southeast1.firebasedatabase.app"
 ).rstrip("/")
 
 class SessionBindRequest(BaseModel):
@@ -49,6 +51,7 @@ class ModelSyncRequest(BaseModel):
 def read_root():
     return {
         "system": "VoltPulse AI Multi-Tenant Concurrent Engine",
+        "database_endpoint": FIREBASE_RTDB_BASE,
         "active_vehicle_sessions": list(active_vehicle_sessions.keys()),
         "cached_models": list(vehicle_models_catalog.keys()),
         "total_active_sessions": len(active_vehicle_sessions),
@@ -57,8 +60,6 @@ def read_root():
 @app.post("/api/session/bind")
 def bind_session(req: SessionBindRequest):
     chassis = req.chassisNumber.strip().upper()
-    
-    # 1. Resolve calibration: either directly provided, from catalog, or fallback
     cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_DEMO_CALIBRATION
     
     active_vehicle_sessions[chassis] = {
@@ -98,20 +99,16 @@ def sync_model(req: ModelSyncRequest):
     return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
 def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
-    """Extracts sensor values handling any nesting or key-casing."""
     if not isinstance(data, dict):
         return None
 
-    # If nested under chassis key or telemetry key
     if chassis in data and isinstance(data[chassis], dict):
         data = data[chassis]
     elif "telemetry" in data and isinstance(data["telemetry"], dict):
         data = data["telemetry"]
 
-    # Normalize all dictionary keys to lowercase for foolproof lookup
     lower_map = {str(k).lower(): v for k, v in data.items() if not isinstance(v, (dict, list))}
 
-    # Check for voltage field
     v_raw = lower_map.get("voltage", lower_map.get("bus_voltage", None))
     if v_raw is not None:
         try:
@@ -132,26 +129,25 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     return None
 
 def fetch_firebase_telemetry(chassis: str) -> dict:
-    """Multi-tier Firebase RTDB reader: checks /{chassis}, /telemetry, and root /."""
+    """Dynamically queries Realtime Database for ANY registered chassis."""
+    clean_chassis = chassis.strip().upper()
     lookup_paths = [
-        f"/{chassis}.json",
-        f"/telemetry/{chassis}.json",
-        f"/telemetry.json",
+        f"/{clean_chassis}.json",
+        f"/telemetry/{clean_chassis}.json",
         f"/.json"
     ]
 
     for path in lookup_paths:
         url = f"{FIREBASE_RTDB_BASE}{path}"
         try:
-            resp = requests.get(url, timeout=2.0)
+            resp = requests.get(url, timeout=2.5)
             if resp.status_code == 200 and resp.json():
-                extracted = _extract_telemetry_fields(resp.json(), chassis)
-                if extracted and extracted["Voltage"] > 0:
+                extracted = _extract_telemetry_fields(resp.json(), clean_chassis)
+                if extracted is not None:
                     return extracted
-        except Exception:
+        except Exception as e:
             continue
 
-    # Fallback if hardware bench is offline/initializing
     return {
         "Voltage": 0.0,
         "Current": 0.0,
@@ -162,7 +158,7 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
         "vibration_x": 0.05,
         "vibration_y": 0.08,
         "vibration_z": 9.82,
-        "chassis": chassis,
+        "chassis": clean_chassis,
     }
 
 @app.get("/api/telemetry/{chassis}")
@@ -273,7 +269,7 @@ def simulate_fault(chassis: str, fault_class: int):
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
     c = chassis.strip().upper()
-    print(f"[WebSocket Connected] Chassis: {c}")
+    print(f"[WebSocket Connected] Live stream established for chassis: {c}")
 
     try:
         while True:
@@ -304,6 +300,6 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
-        print(f"[WebSocket Disconnected] Chassis: {c}")
+        print(f"[WebSocket Disconnected] Client closed for chassis: {c}")
     except Exception as e:
         print(f"[WebSocket Error] {e}")

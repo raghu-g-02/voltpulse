@@ -1,4 +1,4 @@
-// src/pages/AuthPage.jsx
+// frontend/src/pages/AuthPage.jsx
 import React, { useState, useEffect } from "react";
 import { 
   createUserWithEmailAndPassword, 
@@ -6,7 +6,8 @@ import {
   sendPasswordResetEmail 
 } from "firebase/auth";
 import { doc, setDoc, getDoc, collection, getDocs } from "firebase/firestore";
-import { auth, db } from "../firebase";
+import { ref, set, get } from "firebase/database";
+import { auth, db, rtdb } from "../firebase";
 import { Zap, Mail, Lock, User, Phone, Cpu, Factory, CheckCircle2 } from "lucide-react";
 
 export default function AuthPage({ onLoginSuccess }) {
@@ -16,7 +17,6 @@ export default function AuthPage({ onLoginSuccess }) {
   const [errorMsg, setErrorMsg] = useState("");
   const [infoMsg, setInfoMsg] = useState("");
 
-  // All models from Firestore
   const [allModels, setAllModels] = useState([]);
   const [availableCompanies, setAvailableCompanies] = useState([]);
 
@@ -36,7 +36,6 @@ export default function AuthPage({ onLoginSuccess }) {
   // Admin / Manufacturer Details
   const [companyName, setCompanyName] = useState("");
 
-  // Load models from Firestore
   useEffect(() => {
     const loadModels = async () => {
       try {
@@ -45,7 +44,6 @@ export default function AuthPage({ onLoginSuccess }) {
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
         setAllModels(list);
 
-        // Extract unique companies/manufacturers
         const companies = Array.from(new Set(list.map((m) => m.manufacturer || "Other"))).filter(Boolean);
         setAvailableCompanies(companies);
 
@@ -53,13 +51,12 @@ export default function AuthPage({ onLoginSuccess }) {
           setSelectedCompany(companies[0]);
         }
       } catch (err) {
-        console.error("Error loading models:", err);
+        console.error("Error loading models from Firestore:", err);
       }
     };
     loadModels();
   }, []);
 
-  // Update available models when selectedCompany changes
   const filteredModels = allModels.filter(
     (m) => (m.manufacturer || "").toLowerCase() === (selectedCompany || "").toLowerCase()
   );
@@ -70,25 +67,24 @@ export default function AuthPage({ onLoginSuccess }) {
     }
   }, [selectedCompany, filteredModels]);
 
-  // Chassis Number Auto-Detection Logic
   const handleChassisChange = (rawChassis) => {
-    const cleanChassis = rawChassis.toUpperCase();
+    const cleanChassis = rawChassis.toUpperCase().trim();
     setChassisNumber(cleanChassis);
 
-    if (!cleanChassis.trim()) {
+    if (!cleanChassis) {
       setChassisMatchedNotice("");
       return;
     }
 
-    // Search across all models to see if this chassis was pre-registered
     const matched = allModels.find(
-      (m) => Array.isArray(m.assignedChassis) && m.assignedChassis.includes(cleanChassis)
+      (m) => Array.isArray(m.assignedChassis) && 
+             m.assignedChassis.some((c) => String(c).trim().toUpperCase() === cleanChassis)
     );
 
     if (matched) {
       setSelectedCompany(matched.manufacturer);
       setVehicleModel(matched.modelName);
-      setChassisMatchedNotice(`✓ Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+      setChassisMatchedNotice(`Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
     } else {
       setChassisMatchedNotice("");
     }
@@ -110,14 +106,14 @@ export default function AuthPage({ onLoginSuccess }) {
           onLoginSuccess({ uid: cred.user.uid, email: cred.user.email, role: "user" });
         }
       } else {
-        // Registration
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         const uid = cred.user.uid;
 
-        // Find selected model envelope to attach to profile
         const matchedModel = allModels.find(
           (m) => m.modelName === vehicleModel && (m.manufacturer || "").toLowerCase() === selectedCompany.toLowerCase()
-        ) || allModels[0];
+        ) || allModels.find((m) => m.modelName === vehicleModel) || allModels[0];
+
+        const cleanChassis = chassisNumber.trim().toUpperCase() || "CHASSIS-DEMO-01";
 
         const profileData = {
           uid,
@@ -133,21 +129,41 @@ export default function AuthPage({ onLoginSuccess }) {
           profileData.adminRole = "OEM Engineer / Admin";
         } else {
           profileData.companyName = selectedCompany || "Tata Motors";
-          profileData.vehicleModel = vehicleModel || (filteredModels[0]?.modelName ?? "EV Model");
+          profileData.vehicleModel = vehicleModel || (filteredModels[0]?.modelName ?? "Nexon EV");
           profileData.vehicleId = vehicleId.trim() || "KA-01-EV-0001";
-          profileData.chassisNumber = chassisNumber.trim().toUpperCase() || "CHASSIS-DEMO-01";
+          profileData.chassisNumber = cleanChassis;
+
           if (matchedModel) {
             profileData.calibration = {
               modelName: matchedModel.modelName,
               manufacturer: matchedModel.manufacturer,
-              voltage_nominal: matchedModel.voltage_nominal,
-              voltage_sag_limit: matchedModel.voltage_sag_limit,
-              current_nominal: matchedModel.current_nominal,
-              current_overload_limit: matchedModel.current_overload_limit,
-              temp_nominal: matchedModel.temp_nominal,
-              temp_critical_limit: matchedModel.temp_critical_limit,
-              rpm_max_rated: matchedModel.rpm_max_rated,
+              voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 5.0,
+              voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 4.2,
+              current_nominal: parseFloat(matchedModel.current_nominal) || 0.25,
+              current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 0.95,
+              temp_nominal: parseFloat(matchedModel.temp_nominal) || 25.0,
+              temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 42.0,
+              rpm_max_rated: parseFloat(matchedModel.rpm_max_rated) || 250,
             };
+          }
+
+          // DYNAMIC PROVISIONING IN FIREBASE REALTIME DATABASE
+          const chassisRtdbRef = ref(rtdb, cleanChassis);
+          const rtdbSnap = await get(chassisRtdbRef);
+          if (!rtdbSnap.exists()) {
+            await set(chassisRtdbRef, {
+              chassis: cleanChassis,
+              Voltage: parseFloat(matchedModel?.voltage_nominal ?? 5.0),
+              Current: parseFloat(matchedModel?.current_nominal ?? 0.25),
+              Temperature: parseFloat(matchedModel?.temp_nominal ?? 25.0),
+              motor_rpm: Math.round((matchedModel?.rpm_max_rated ?? 250) * 0.8),
+              ambient_temp: 25.0,
+              ambient_humidity: 50.0,
+              vibration_x: 0.05,
+              vibration_y: 0.08,
+              vibration_z: 9.82,
+              timestamp: Date.now()
+            });
           }
         }
 
@@ -184,7 +200,7 @@ export default function AuthPage({ onLoginSuccess }) {
           </div>
           <h1 className="text-xl font-black text-slate-900 tracking-tight">VoltPulse AI</h1>
           <p className="text-xs text-slate-500">
-            {isLogin ? "Sign in to access live telematics and vehicle telemetry" : "Register vehicle and link telemetry calibration"}
+            {isLogin ? "Sign in to access live telematics cockpit" : "Register vehicle and auto-provision telematics"}
           </p>
         </div>
 
@@ -269,7 +285,6 @@ export default function AuthPage({ onLoginSuccess }) {
                 </div>
               ) : (
                 <>
-                  {/* Step 1: Chassis Number with Auto-Detection */}
                   <div>
                     <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
                       Chassis Number (VIN)
@@ -293,7 +308,6 @@ export default function AuthPage({ onLoginSuccess }) {
                     )}
                   </div>
 
-                  {/* Step 2: Company Dropdown & Filtered Model Dropdown */}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">

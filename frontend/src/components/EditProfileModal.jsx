@@ -1,9 +1,10 @@
-// src/components/EditProfileModal.jsx
+// frontend/src/components/EditProfileModal.jsx
 import React, { useState, useEffect, useMemo } from "react";
 import { doc, updateDoc, collection, getDocs } from "firebase/firestore";
-import { db } from "../firebase";
+import { ref, set, get } from "firebase/database";
+import { db, rtdb } from "../firebase";
 import { useAuth } from "../context/AuthContext";
-import { Car, X, Check, Cpu, Phone, User, CheckCircle2, Factory } from "lucide-react";
+import { Car, X, Check, Cpu, Phone, User, CheckCircle2 } from "lucide-react";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").replace(/\/$/, "");
 
@@ -13,7 +14,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
   const [allModels, setAllModels] = useState([]);
   const [loadingModels, setLoadingModels] = useState(true);
 
-  // Form states
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [selectedCompany, setSelectedCompany] = useState("");
@@ -23,7 +23,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
   const [chassisNotice, setChassisNotice] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // 1. Fetch live vehicle_models catalog from Firestore
   useEffect(() => {
     if (!isOpen) return;
 
@@ -52,7 +51,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
 
         setAllModels(list);
 
-        // Populate owner profile fields
         if (userProfile) {
           setFullName(userProfile.fullName || "");
           setPhone(userProfile.phone || "");
@@ -60,7 +58,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
           const currentChassis = (userProfile.chassisNumber || "").trim().toUpperCase();
           setChassisNumber(currentChassis);
 
-          // Check if this chassis was pre-registered under an OEM model
           const matchedByChassis = list.find((m) =>
             Array.isArray(m.assignedChassis) &&
             m.assignedChassis.some((c) => String(c).trim().toUpperCase() === currentChassis)
@@ -69,9 +66,8 @@ export default function EditProfileModal({ isOpen, onClose }) {
           if (matchedByChassis) {
             setSelectedCompany(matchedByChassis.manufacturer);
             setVehicleModel(matchedByChassis.modelName);
-            setChassisNotice(`✓ Auto-detected: ${matchedByChassis.manufacturer} ${matchedByChassis.modelName}`);
+            setChassisNotice(`Auto-detected: ${matchedByChassis.manufacturer} ${matchedByChassis.modelName}`);
           } else {
-            // Flexible match for company name (e.g. "Tata" matches "Tata Motors")
             const userComp = (userProfile.companyName || "").trim().toLowerCase();
             const matchedComp = list.find((m) => {
               const mComp = (m.manufacturer || "").trim().toLowerCase();
@@ -81,7 +77,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
             const resolvedCompany = matchedComp ? matchedComp.manufacturer : (list[0]?.manufacturer || "Tata Motors");
             setSelectedCompany(resolvedCompany);
 
-            // Filter models for this company
             const companyModels = list.filter(
               (m) => (m.manufacturer || "").trim().toLowerCase() === resolvedCompany.trim().toLowerCase()
             );
@@ -109,7 +104,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
     fetchCatalog();
   }, [isOpen, userProfile]);
 
-  // 2. Extract distinct companies directly from Firestore models
   const availableCompanies = useMemo(() => {
     const compSet = new Set();
     allModels.forEach((m) => {
@@ -121,7 +115,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
     return result.length > 0 ? result : ["Tata Motors"];
   }, [allModels]);
 
-  // 3. Filter models strictly by the selected company with fuzzy tolerance
   const filteredModels = useMemo(() => {
     if (!selectedCompany) return allModels;
     const normSelected = selectedCompany.trim().toLowerCase();
@@ -131,11 +124,9 @@ export default function EditProfileModal({ isOpen, onClose }) {
       return normM === normSelected || normM.includes(normSelected) || normSelected.includes(normM);
     });
 
-    // Fallback: If company filter yields nothing, show all models so the dropdown is never empty
     return matches.length > 0 ? matches : allModels;
   }, [allModels, selectedCompany]);
 
-  // 4. Keep vehicleModel synced whenever selectedCompany changes
   useEffect(() => {
     if (filteredModels.length > 0) {
       const exists = filteredModels.some(
@@ -147,7 +138,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
     }
   }, [selectedCompany, filteredModels]);
 
-  // 5. Live VIN Auto-Detection
   const handleChassisChange = (rawChassis) => {
     const clean = rawChassis.toUpperCase().trim();
     setChassisNumber(clean);
@@ -165,7 +155,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
     if (matched) {
       setSelectedCompany(matched.manufacturer);
       setVehicleModel(matched.modelName);
-      setChassisNotice(`✓ Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+      setChassisNotice(`Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
     } else {
       setChassisNotice("");
     }
@@ -178,7 +168,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
     if (!currentUser) return;
     setSaving(true);
 
-    // Find the exact calibration limits from the selected model
     const matchedModel = allModels.find(
       (m) =>
         m.modelName?.trim().toLowerCase() === vehicleModel?.trim().toLowerCase() &&
@@ -200,13 +189,15 @@ export default function EditProfileModal({ isOpen, onClose }) {
         }
       : null;
 
+    const cleanChassis = chassisNumber.trim().toUpperCase();
+
     const updatedProfile = {
       fullName: fullName.trim(),
       phone: phone.trim(),
       companyName: selectedCompany,
       vehicleModel: vehicleModel.trim(),
       vehicleId: vehicleId.trim(),
-      chassisNumber: chassisNumber.trim().toUpperCase(),
+      chassisNumber: cleanChassis,
       ...(calibrationPayload && { calibration: calibrationPayload }),
     };
 
@@ -215,7 +206,26 @@ export default function EditProfileModal({ isOpen, onClose }) {
       const userRef = doc(db, "users", currentUser.uid);
       await updateDoc(userRef, updatedProfile);
 
-      // 2. Sync updated session directly to the backend
+      // 2. Provision new chassis node in Realtime Database if missing
+      const chassisRtdbRef = ref(rtdb, cleanChassis);
+      const snap = await get(chassisRtdbRef);
+      if (!snap.exists()) {
+        await set(chassisRtdbRef, {
+          chassis: cleanChassis,
+          Voltage: parseFloat(calibrationPayload?.voltage_nominal ?? 3.5),
+          Current: parseFloat(calibrationPayload?.current_nominal ?? 0.25),
+          Temperature: parseFloat(calibrationPayload?.temp_nominal ?? 25.0),
+          motor_rpm: Math.round((calibrationPayload?.rpm_max_rated ?? 250) * 0.8),
+          ambient_temp: 25.0,
+          ambient_humidity: 50.0,
+          vibration_x: 0.05,
+          vibration_y: 0.08,
+          vibration_z: 9.82,
+          timestamp: Date.now()
+        });
+      }
+
+      // 3. Sync updated session with the FastAPI backend
       await fetch(`${API_BASE}/api/session/bind`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -287,7 +297,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
             </div>
           </div>
 
-          {/* Chassis VIN with Real-Time OEM Match */}
           <div>
             <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
               Chassis Number (VIN)
@@ -311,7 +320,6 @@ export default function EditProfileModal({ isOpen, onClose }) {
             )}
           </div>
 
-          {/* Company & Model Dropdowns */}
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
