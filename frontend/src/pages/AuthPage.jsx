@@ -7,7 +7,7 @@ import {
 } from "firebase/auth";
 import { doc, setDoc, getDoc, collection, getDocs } from "firebase/firestore";
 import { auth, db } from "../firebase";
-import { Zap, Mail, Lock, User, Phone, Cpu, Factory } from "lucide-react";
+import { Zap, Mail, Lock, User, Phone, Cpu, Factory, CheckCircle2 } from "lucide-react";
 
 export default function AuthPage({ onLoginSuccess }) {
   const [isLogin, setIsLogin] = useState(true);
@@ -16,8 +16,9 @@ export default function AuthPage({ onLoginSuccess }) {
   const [errorMsg, setErrorMsg] = useState("");
   const [infoMsg, setInfoMsg] = useState("");
 
-  // Available vehicle models from Firestore
-  const [availableModels, setAvailableModels] = useState([]);
+  // All models from Firestore
+  const [allModels, setAllModels] = useState([]);
+  const [availableCompanies, setAvailableCompanies] = useState([]);
 
   // Form Fields
   const [email, setEmail] = useState("");
@@ -25,31 +26,73 @@ export default function AuthPage({ onLoginSuccess }) {
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
 
-  // User Vehicle Details
-  const [vehicleId, setVehicleId] = useState("");
+  // Vehicle Details
+  const [selectedCompany, setSelectedCompany] = useState("");
   const [vehicleModel, setVehicleModel] = useState("");
-  const [customModelInput, setCustomModelInput] = useState("");
+  const [vehicleId, setVehicleId] = useState("");
   const [chassisNumber, setChassisNumber] = useState("");
+  const [chassisMatchedNotice, setChassisMatchedNotice] = useState("");
 
   // Admin / Manufacturer Details
   const [companyName, setCompanyName] = useState("");
 
+  // Load models from Firestore
   useEffect(() => {
     const loadModels = async () => {
       try {
         const snap = await getDocs(collection(db, "vehicle_models"));
         const list = [];
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-        setAvailableModels(list);
-        if (list.length > 0) {
-          setVehicleModel(list[0].modelName);
+        setAllModels(list);
+
+        // Extract unique companies/manufacturers
+        const companies = Array.from(new Set(list.map((m) => m.manufacturer || "Other"))).filter(Boolean);
+        setAvailableCompanies(companies);
+
+        if (companies.length > 0) {
+          setSelectedCompany(companies[0]);
         }
       } catch (err) {
-        console.error("Error loading vehicle models:", err);
+        console.error("Error loading models:", err);
       }
     };
     loadModels();
   }, []);
+
+  // Update available models when selectedCompany changes
+  const filteredModels = allModels.filter(
+    (m) => (m.manufacturer || "").toLowerCase() === (selectedCompany || "").toLowerCase()
+  );
+
+  useEffect(() => {
+    if (filteredModels.length > 0 && !filteredModels.some((m) => m.modelName === vehicleModel)) {
+      setVehicleModel(filteredModels[0].modelName);
+    }
+  }, [selectedCompany, filteredModels]);
+
+  // Chassis Number Auto-Detection Logic
+  const handleChassisChange = (rawChassis) => {
+    const cleanChassis = rawChassis.toUpperCase();
+    setChassisNumber(cleanChassis);
+
+    if (!cleanChassis.trim()) {
+      setChassisMatchedNotice("");
+      return;
+    }
+
+    // Search across all models to see if this chassis was pre-registered
+    const matched = allModels.find(
+      (m) => Array.isArray(m.assignedChassis) && m.assignedChassis.includes(cleanChassis)
+    );
+
+    if (matched) {
+      setSelectedCompany(matched.manufacturer);
+      setVehicleModel(matched.modelName);
+      setChassisMatchedNotice(`✓ Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+    } else {
+      setChassisMatchedNotice("");
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -71,7 +114,10 @@ export default function AuthPage({ onLoginSuccess }) {
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         const uid = cred.user.uid;
 
-        const finalModelName = vehicleModel === "CUSTOM" ? customModelInput.trim() : vehicleModel;
+        // Find selected model envelope to attach to profile
+        const matchedModel = allModels.find(
+          (m) => m.modelName === vehicleModel && (m.manufacturer || "").toLowerCase() === selectedCompany.toLowerCase()
+        ) || allModels[0];
 
         const profileData = {
           uid,
@@ -83,12 +129,26 @@ export default function AuthPage({ onLoginSuccess }) {
         };
 
         if (role === "admin") {
-          profileData.companyName = companyName.trim() || "Automotive Manufacturer";
+          profileData.companyName = companyName.trim() || "Tata Motors";
           profileData.adminRole = "OEM Engineer / Admin";
         } else {
+          profileData.companyName = selectedCompany || "Tata Motors";
+          profileData.vehicleModel = vehicleModel || (filteredModels[0]?.modelName ?? "EV Model");
           profileData.vehicleId = vehicleId.trim() || "KA-01-EV-0001";
-          profileData.vehicleModel = finalModelName || "5V TT-Motor Testbench";
           profileData.chassisNumber = chassisNumber.trim().toUpperCase() || "CHASSIS-DEMO-01";
+          if (matchedModel) {
+            profileData.calibration = {
+              modelName: matchedModel.modelName,
+              manufacturer: matchedModel.manufacturer,
+              voltage_nominal: matchedModel.voltage_nominal,
+              voltage_sag_limit: matchedModel.voltage_sag_limit,
+              current_nominal: matchedModel.current_nominal,
+              current_overload_limit: matchedModel.current_overload_limit,
+              temp_nominal: matchedModel.temp_nominal,
+              temp_critical_limit: matchedModel.temp_critical_limit,
+              rpm_max_rated: matchedModel.rpm_max_rated,
+            };
+          }
         }
 
         await setDoc(doc(db, "users", uid), profileData);
@@ -124,7 +184,7 @@ export default function AuthPage({ onLoginSuccess }) {
           </div>
           <h1 className="text-xl font-black text-slate-900 tracking-tight">VoltPulse AI</h1>
           <p className="text-xs text-slate-500">
-            {isLogin ? "Sign in to access live telematics and vehicle telemetry" : "Register vehicle and bind diagnostic telemetry"}
+            {isLogin ? "Sign in to access live telematics and vehicle telemetry" : "Register vehicle and link telemetry calibration"}
           </p>
         </div>
 
@@ -200,72 +260,94 @@ export default function AuthPage({ onLoginSuccess }) {
                     <input
                       type="text"
                       required
-                      placeholder="Tata Motors / VoltPulse Labs"
+                      placeholder="e.g. Tata Motors"
                       value={companyName}
                       onChange={(e) => setCompanyName(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500"
+                      className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500 font-bold"
                     />
                   </div>
                 </div>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Vehicle Model</label>
-                      <select
-                        value={vehicleModel}
-                        onChange={(e) => setVehicleModel(e.target.value)}
-                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500"
-                      >
-                        {availableModels.map((m) => (
-                          <option key={m.id} value={m.modelName}>
-                            {m.manufacturer} - {m.modelName}
-                          </option>
-                        ))}
-                        <option value="CUSTOM">+ Type Custom Model</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Plate Number</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="KA-05-EV-1234"
-                        value={vehicleId}
-                        onChange={(e) => setVehicleId(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500 font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  {vehicleModel === "CUSTOM" && (
-                    <div>
-                      <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Enter Custom Model Name</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="e.g. Ather 450X Apex"
-                        value={customModelInput}
-                        onChange={(e) => setCustomModelInput(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500"
-                      />
-                    </div>
-                  )}
-
+                  {/* Step 1: Chassis Number with Auto-Detection */}
                   <div>
-                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Chassis Number (VIN)</label>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+                      Chassis Number (VIN)
+                    </label>
                     <div className="relative">
                       <Cpu className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                       <input
                         type="text"
                         required
-                        placeholder="VIN-TESTBENCH-01"
+                        placeholder="e.g. MAT612089N1A23456"
                         value={chassisNumber}
-                        onChange={(e) => setChassisNumber(e.target.value.toUpperCase())}
+                        onChange={(e) => handleChassisChange(e.target.value)}
                         className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 font-mono font-bold focus:bg-white focus:outline-none focus:border-cyan-500"
                       />
                     </div>
+                    {chassisMatchedNotice && (
+                      <div className="mt-1 flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-200">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>{chassisMatchedNotice}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Step 2: Company Dropdown & Filtered Model Dropdown */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+                        Vehicle Company
+                      </label>
+                      <select
+                        value={selectedCompany}
+                        onChange={(e) => setSelectedCompany(e.target.value)}
+                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
+                      >
+                        {availableCompanies.length === 0 ? (
+                          <option value="Tata Motors">Tata Motors</option>
+                        ) : (
+                          availableCompanies.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">
+                        Vehicle Model
+                      </label>
+                      <select
+                        value={vehicleModel}
+                        onChange={(e) => setVehicleModel(e.target.value)}
+                        className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-cyan-800 focus:bg-white focus:outline-none focus:border-cyan-500"
+                      >
+                        {filteredModels.length === 0 ? (
+                          <option value="">No models registered</option>
+                        ) : (
+                          filteredModels.map((m) => (
+                            <option key={m.id} value={m.modelName}>
+                              {m.modelName}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-semibold text-slate-400 uppercase block mb-1">Plate Number / Vehicle ID</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="KA-05-EV-1234"
+                      value={vehicleId}
+                      onChange={(e) => setVehicleId(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 focus:bg-white focus:outline-none focus:border-cyan-500 font-mono"
+                    />
                   </div>
                 </>
               )}

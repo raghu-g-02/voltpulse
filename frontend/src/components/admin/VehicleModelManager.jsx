@@ -1,6 +1,6 @@
 // src/components/admin/VehicleModelManager.jsx
 import React, { useState } from "react";
-import { Sliders, Plus, Trash2, Edit3, Check, X, ShieldCheck } from "lucide-react";
+import { Sliders, Plus, Trash2, Edit3, Check, X, ShieldCheck, Cpu } from "lucide-react";
 import { doc, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "../../firebase";
 
@@ -12,7 +12,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
 
   const initialForm = {
     modelName: "",
-    manufacturer: manufacturerName || "Automotive OEM",
+    manufacturer: manufacturerName || "Tata Motors",
     voltage_nominal: 350.0,
     voltage_sag_limit: 300.0,
     current_nominal: 45.0,
@@ -20,6 +20,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     temp_nominal: 30.0,
     temp_critical_limit: 62.0,
     rpm_max_rated: 12000,
+    chassisInput: "", // comma or newline separated
   };
 
   const [formData, setFormData] = useState(initialForm);
@@ -29,7 +30,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     setEditingId(model.id);
     setFormData({
       modelName: model.modelName || "",
-      manufacturer: model.manufacturer || manufacturerName || "Automotive OEM",
+      manufacturer: model.manufacturer || manufacturerName || "Tata Motors",
       voltage_nominal: model.voltage_nominal ?? 350.0,
       voltage_sag_limit: model.voltage_sag_limit ?? 300.0,
       current_nominal: model.current_nominal ?? 45.0,
@@ -37,6 +38,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
       temp_nominal: model.temp_nominal ?? 30.0,
       temp_critical_limit: model.temp_critical_limit ?? 62.0,
       rpm_max_rated: model.rpm_max_rated ?? 12000,
+      chassisInput: Array.isArray(model.assignedChassis) ? model.assignedChassis.join(", ") : "",
     });
     setIsAdding(true);
   };
@@ -57,10 +59,16 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     setSaving(true);
     const docId = editingId || formData.modelName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
+    // Parse chassis numbers into an array of clean uppercase strings
+    const chassisArray = formData.chassisInput
+      .split(/[\n,]+/)
+      .map((c) => c.trim().toUpperCase())
+      .filter((c) => c.length > 0);
+
     const payload = {
       id: docId,
       modelName: formData.modelName.trim(),
-      manufacturer: formData.manufacturer || manufacturerName || "Automotive OEM",
+      manufacturer: formData.manufacturer.trim() || manufacturerName || "Tata Motors",
       voltage_nominal: parseFloat(formData.voltage_nominal) || 5.0,
       voltage_sag_limit: parseFloat(formData.voltage_sag_limit) || 4.2,
       current_nominal: parseFloat(formData.current_nominal) || 0.25,
@@ -68,6 +76,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
       temp_nominal: parseFloat(formData.temp_nominal) || 27.0,
       temp_critical_limit: parseFloat(formData.temp_critical_limit) || 42.0,
       rpm_max_rated: parseFloat(formData.rpm_max_rated) || 250,
+      assignedChassis: chassisArray,
       updatedAt: Date.now(),
     };
 
@@ -113,7 +122,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
             Vehicle Models & Calibration Catalog
           </h2>
           <p className="text-xs text-slate-500">
-            Define threshold envelopes per model variant. All registered vehicles under a model inherit these rules.
+            Define vehicle models, tune threshold envelopes, and pre-assign authorized Chassis Numbers (VINs).
           </p>
         </div>
 
@@ -145,6 +154,18 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
             <div>
+              <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Company / Manufacturer</label>
+              <input
+                type="text"
+                required
+                placeholder="e.g. Tata Motors, Mahindra, Demo Lab"
+                value={formData.manufacturer}
+                onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
+                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            <div>
               <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Model Name</label>
               <input
                 type="text"
@@ -153,16 +174,6 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
                 value={formData.modelName}
                 onChange={(e) => setFormData({ ...formData, modelName: e.target.value })}
                 className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-cyan-500 font-bold"
-              />
-            </div>
-
-            <div>
-              <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Manufacturer</label>
-              <input
-                type="text"
-                value={formData.manufacturer}
-                onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
-                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-cyan-500"
               />
             </div>
 
@@ -249,6 +260,24 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
             </div>
           </div>
 
+          {/* Assigned Chassis / VINs Input */}
+          <div className="pt-2">
+            <label className="text-[10px] font-semibold text-cyan-800 uppercase block mb-1 flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 text-cyan-600" />
+              <span>Assigned Chassis Numbers / VINs for this Model (Comma or Line Separated)</span>
+            </label>
+            <textarea
+              rows={2}
+              placeholder="e.g. MAT612089N1A23456, VIN-TATA-001, VIN-TATA-002"
+              value={formData.chassisInput}
+              onChange={(e) => setFormData({ ...formData, chassisInput: e.target.value })}
+              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs text-slate-900 focus:outline-none focus:border-cyan-500"
+            />
+            <p className="text-[10px] text-slate-400 mt-0.5">
+              When a user enters any of these chassis numbers during registration, this model and its calibration will be automatically selected.
+            </p>
+          </div>
+
           <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
             <button
               type="button"
@@ -279,49 +308,56 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
           <table className="w-full text-left text-xs">
             <thead className="text-[10px] uppercase font-mono text-slate-400 bg-slate-50 border-b border-slate-100">
               <tr>
+                <th className="py-2.5 px-3">Company</th>
                 <th className="py-2.5 px-3">Model Variant</th>
-                <th className="py-2.5 px-3">Manufacturer</th>
                 <th className="py-2.5 px-3">Nominal Voltage</th>
                 <th className="py-2.5 px-3">Sag Limit</th>
                 <th className="py-2.5 px-3">Overload Limit</th>
                 <th className="py-2.5 px-3">Max Temp</th>
-                <th className="py-2.5 px-3">Max RPM</th>
+                <th className="py-2.5 px-3">Linked Chassis</th>
                 <th className="py-2.5 px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-mono">
-              {vehicleModels.map((m) => (
-                <tr key={m.id} className="hover:bg-slate-50 transition">
-                  <td className="py-2.5 px-3 font-sans font-bold text-slate-900 flex items-center gap-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-cyan-600" />
-                    <span>{m.modelName}</span>
-                  </td>
-                  <td className="py-2.5 px-3 font-sans text-slate-600">{m.manufacturer}</td>
-                  <td className="py-2.5 px-3 text-cyan-700 font-bold">{m.voltage_nominal} V</td>
-                  <td className="py-2.5 px-3 text-rose-600 font-bold">&le; {m.voltage_sag_limit} V</td>
-                  <td className="py-2.5 px-3 text-rose-600 font-bold">&ge; {m.current_overload_limit} A</td>
-                  <td className="py-2.5 px-3 text-amber-600 font-bold">&ge; {m.temp_critical_limit} °C</td>
-                  <td className="py-2.5 px-3 text-slate-800">{m.rpm_max_rated} RPM</td>
-                  <td className="py-2.5 px-3 text-right">
-                    <div className="flex items-center justify-end gap-1 font-sans">
-                      <button
-                        onClick={() => handleEditClick(m)}
-                        className="p-1 rounded text-slate-400 hover:text-cyan-600 hover:bg-cyan-50"
-                        title="Edit Model"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteModel(m.id, m.modelName)}
-                        className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                        title="Delete Model"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {vehicleModels.map((m) => {
+                const chassisCount = Array.isArray(m.assignedChassis) ? m.assignedChassis.length : 0;
+                return (
+                  <tr key={m.id} className="hover:bg-slate-50 transition">
+                    <td className="py-2.5 px-3 font-sans font-bold text-slate-800">{m.manufacturer}</td>
+                    <td className="py-2.5 px-3 font-sans font-bold text-slate-900 flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-cyan-600" />
+                      <span>{m.modelName}</span>
+                    </td>
+                    <td className="py-2.5 px-3 text-cyan-700 font-bold">{m.voltage_nominal} V</td>
+                    <td className="py-2.5 px-3 text-rose-600 font-bold">&le; {m.voltage_sag_limit} V</td>
+                    <td className="py-2.5 px-3 text-rose-600 font-bold">&ge; {m.current_overload_limit} A</td>
+                    <td className="py-2.5 px-3 text-amber-600 font-bold">&ge; {m.temp_critical_limit} °C</td>
+                    <td className="py-2.5 px-3 font-sans">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-50 text-cyan-800 border border-cyan-200">
+                        {chassisCount} VIN{chassisCount === 1 ? "" : "s"}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
+                      <div className="flex items-center justify-end gap-1 font-sans">
+                        <button
+                          onClick={() => handleEditClick(m)}
+                          className="p-1 rounded text-slate-400 hover:text-cyan-600 hover:bg-cyan-50"
+                          title="Edit Model"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteModel(m.id, m.modelName)}
+                          className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                          title="Delete Model"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
