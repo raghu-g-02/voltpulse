@@ -202,6 +202,7 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
             vehicleModels={vehicleModels}
             manufacturerName={userProfile?.companyName || userProfile?.fullName || "Automotive OEM"}
             onRefresh={fetchVehicleModels}
+            onBack={() => setAdminSubView("home")}
           />
         ) : adminSubView === "fleet" ? (
           <FleetDirectory
