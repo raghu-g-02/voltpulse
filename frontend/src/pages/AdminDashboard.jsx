@@ -14,7 +14,7 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").repl
 
 export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubView = "home" }) {
   const { userProfile } = useAuth();
-  const [adminSubView, setAdminSubView] = useState(initialSubView); // "home" | "fleet" | "models" | "inspect"
+  const [adminSubView, setAdminSubView] = useState(initialSubView); // "home" | "fleet" | "models"
 
   const [fleetUsers, setFleetUsers] = useState([]);
   const [vehicleModels, setVehicleModels] = useState([]);
@@ -91,7 +91,10 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
     if (!inspectedVehicle) return;
     setLoadingAuditData(true);
 
-    const faultQ = query(collection(db, "users", inspectedVehicle.id, "fault_history"), orderBy("timestampRaw", "desc"));
+    const faultQ = query(
+      collection(db, "users", inspectedVehicle.id, "fault_history"), 
+      orderBy("timestampRaw", "desc")
+    );
     const unsubFaults = onSnapshot(faultQ, (snapshot) => {
       const fRecords = [];
       snapshot.forEach((d) => fRecords.push({ id: d.id, ...d.data() }));
@@ -99,7 +102,10 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
       setLoadingAuditData(false);
     });
 
-    const logQ = query(collection(db, "users", inspectedVehicle.id, "telemetry_logs"), orderBy("timestampRaw", "desc"));
+    const logQ = query(
+      collection(db, "users", inspectedVehicle.id, "telemetry_logs"), 
+      orderBy("timestampRaw", "desc")
+    );
     const unsubLogs = onSnapshot(logQ, (snapshot) => {
       const lRecords = [];
       snapshot.forEach((d) => lRecords.push({ id: d.id, ...d.data() }));
@@ -128,7 +134,9 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
 
     setIsCleaningStaleLogs(true);
     try {
-      const promises = staleLogs.map((log) => deleteDoc(doc(db, "users", inspectedVehicle.id, "telemetry_logs", log.id)));
+      const promises = staleLogs.map((log) => 
+        deleteDoc(doc(db, "users", inspectedVehicle.id, "telemetry_logs", log.id))
+      );
       await Promise.all(promises);
       alert(`Deleted ${staleLogs.length} stale logs.`);
     } catch (e) {
@@ -211,8 +219,14 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
             searchInput={searchInput}
             setSearchInput={setSearchInput}
             activeFilterQuery={activeFilterQuery}
-            onSearchSubmit={(e) => { e.preventDefault(); setActiveFilterQuery(searchInput.trim()); }}
-            onClearSearch={() => { setSearchInput(""); setActiveFilterQuery(""); }}
+            onSearchSubmit={(e) => { 
+              e.preventDefault(); 
+              setActiveFilterQuery(searchInput.trim()); 
+            }}
+            onClearSearch={() => { 
+              setSearchInput(""); 
+              setActiveFilterQuery(""); 
+            }}
             onRefresh={fetchFleet}
             onInspectVehicle={(v) => setInspectedVehicle(v)}
           />
