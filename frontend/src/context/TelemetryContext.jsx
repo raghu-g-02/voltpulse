@@ -34,7 +34,10 @@ const defaultContextValue = {
 };
 
 const TelemetryContext = createContext(defaultContextValue);
-const API_BASE = "http://localhost:8000";
+
+// Sanitized API base URL (strips trailing slashes if present)
+const rawApiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_BASE = rawApiBase.replace(/\/$/, "");
 
 export function TelemetryProvider({ children }) {
   const { userProfile, currentUser, userRole } = useAuth();
@@ -327,13 +330,17 @@ export function TelemetryProvider({ children }) {
     }
   }, [agentResult, isVoiceMuted, isAdmin]);
 
-  // WebSocket lifecycle management per chassis
+  // WebSocket lifecycle management per chassis (Production wss:// and local ws:// compatible)
   useEffect(() => {
     if (isAdmin || !userChassis) return;
 
     let ws = null;
     let fallbackInterval = null;
-    const chassisWsUrl = `ws://localhost:8000/ws/telemetry/${userChassis}`;
+
+    // Convert https:// -> wss:// and http:// -> ws:// dynamically
+    const wsProtocol = API_BASE.startsWith("https") ? "wss" : "ws";
+    const cleanHost = API_BASE.replace(/^https?:\/\//, "");
+    const chassisWsUrl = `${wsProtocol}://${cleanHost}/ws/telemetry/${userChassis}`;
 
     const connect = () => {
       try {
