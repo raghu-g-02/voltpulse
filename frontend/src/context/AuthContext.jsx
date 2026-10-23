@@ -53,7 +53,7 @@ export function AuthProvider({ children }) {
         uid: user.uid,
         userId: generateUniqueId("MFG"),
         email: user.email,
-        companyName: extraData.companyName || extraData.organizationName || "VoltPulse Lab Rig",
+        companyName: extraData.companyName || extraData.organizationName || "Tata Motors",
         fullName: extraData.fullName || extraData.organizationName || "Fleet Administrator",
         divisionCode: extraData.divisionCode || "PLANT-BLR-01",
         phone: extraData.phone || "",
@@ -71,10 +71,11 @@ export function AuthProvider({ children }) {
         fullName: extraData.fullName || "Vehicle Owner",
         phone: extraData.phone || "",
         role: "user",
-        companyName: extraData.companyName || "VoltPulse Lab Rig",
+        companyName: extraData.companyName || "Tata Motors",
         vehicleId: assignedVehicleId,
-        vehicleModel: extraData.vehicleModel || "3S Hardware Testbench (12V L298N)",
+        vehicleModel: extraData.vehicleModel || "Nexon EV",
         chassisNumber: chassisClean,
+        calibration: extraData.calibration || null,
         createdAt: new Date().toISOString()
       };
     }
@@ -123,10 +124,11 @@ export function AuthProvider({ children }) {
           body: JSON.stringify({
             userId: userProfile?.userId || "OWN-DEFAULT",
             vehicleId: updatedFields.vehicleId || userProfile?.vehicleId || "VEH-DEFAULT",
-            vehicleModel: updatedFields.vehicleModel || userProfile?.vehicleModel || "3S Hardware Testbench (12V L298N)",
+            vehicleModel: updatedFields.vehicleModel || userProfile?.vehicleModel || "Nexon EV",
             email: updatedFields.email || currentUser.email,
             fullName: updatedFields.fullName || userProfile?.fullName || "Vehicle Owner",
-            chassisNumber: updatedFields.chassisNumber || userProfile?.chassisNumber || "MAT612089N1A23456"
+            chassisNumber: updatedFields.chassisNumber || userProfile?.chassisNumber || "MAT612089N1A23456",
+            calibration: userProfile?.calibration || null,
           })
         });
       } catch (e) {

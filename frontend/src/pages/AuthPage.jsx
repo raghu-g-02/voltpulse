@@ -10,6 +10,8 @@ import { ref, set, get } from "firebase/database";
 import { auth, db, rtdb } from "../firebase";
 import { Zap, Mail, Lock, User, Phone, Cpu, Factory, CheckCircle2 } from "lucide-react";
 
+const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").replace(/\/$/, "");
+
 export default function AuthPage({ onLoginSuccess }) {
   const [isLogin, setIsLogin] = useState(true);
   const [role, setRole] = useState("user");
@@ -27,8 +29,8 @@ export default function AuthPage({ onLoginSuccess }) {
   const [phone, setPhone] = useState("");
 
   // Vehicle Details
-  const [selectedCompany, setSelectedCompany] = useState("");
-  const [vehicleModel, setVehicleModel] = useState("");
+  const [selectedCompany, setSelectedCompany] = useState("Tata Motors");
+  const [vehicleModel, setVehicleModel] = useState("Nexon EV");
   const [vehicleId, setVehicleId] = useState("");
   const [chassisNumber, setChassisNumber] = useState("");
   const [chassisMatchedNotice, setChassisMatchedNotice] = useState("");
@@ -44,8 +46,8 @@ export default function AuthPage({ onLoginSuccess }) {
         snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
         setAllModels(list);
 
-        const companies = Array.from(new Set(list.map((m) => m.manufacturer || "Other"))).filter(Boolean);
-        setAvailableCompanies(companies);
+        const companies = Array.from(new Set(list.map((m) => m.manufacturer || "Tata Motors"))).filter(Boolean);
+        setAvailableCompanies(companies.length > 0 ? companies : ["Tata Motors"]);
 
         if (companies.length > 0) {
           setSelectedCompany(companies[0]);
@@ -84,7 +86,7 @@ export default function AuthPage({ onLoginSuccess }) {
     if (matched) {
       setSelectedCompany(matched.manufacturer);
       setVehicleModel(matched.modelName);
-      setChassisMatchedNotice(`Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+      setChassisMatchedNotice(`✓ Auto-detected OEM Model: ${matched.manufacturer} ${matched.modelName}`);
     } else {
       setChassisMatchedNotice("");
     }
@@ -109,11 +111,35 @@ export default function AuthPage({ onLoginSuccess }) {
         const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
         const uid = cred.user.uid;
 
+        const cleanChassis = chassisNumber.trim().toUpperCase() || "MAT612089N1A23456";
+
+        // Auto-match to Admin-defined model in vehicle_models
         const matchedModel = allModels.find(
+          (m) => Array.isArray(m.assignedChassis) &&
+                 m.assignedChassis.some((c) => String(c).trim().toUpperCase() === cleanChassis)
+        ) || allModels.find(
           (m) => m.modelName === vehicleModel && (m.manufacturer || "").toLowerCase() === selectedCompany.toLowerCase()
         ) || allModels.find((m) => m.modelName === vehicleModel) || allModels[0];
 
-        const cleanChassis = chassisNumber.trim().toUpperCase() || "CHASSIS-DEMO-01";
+        const calibrationPayload = matchedModel ? {
+          modelName: matchedModel.modelName || "Nexon EV",
+          manufacturer: matchedModel.manufacturer || "Tata Motors",
+          voltage_min: parseFloat(matchedModel.voltage_min ?? matchedModel.voltage_sag_limit ?? 9.8),
+          voltage_nominal: parseFloat(matchedModel.voltage_nominal ?? 11.8),
+          voltage_max: parseFloat(matchedModel.voltage_max ?? 12.6),
+          voltage_sag_limit: parseFloat(matchedModel.voltage_min ?? matchedModel.voltage_sag_limit ?? 9.8),
+          current_nominal: parseFloat(matchedModel.current_nominal ?? 0.20),
+          current_max: parseFloat(matchedModel.current_max ?? matchedModel.current_overload_limit ?? 0.85),
+          current_overload_limit: parseFloat(matchedModel.current_max ?? matchedModel.current_overload_limit ?? 0.85),
+          temp_nominal: parseFloat(matchedModel.temp_nominal ?? 28.0),
+          temp_max: parseFloat(matchedModel.temp_max ?? matchedModel.temp_critical_limit ?? 38.0),
+          temp_critical_limit: parseFloat(matchedModel.temp_max ?? matchedModel.temp_critical_limit ?? 38.0),
+          rpm_min: parseFloat(matchedModel.rpm_min ?? 30),
+          rpm_max: parseFloat(matchedModel.rpm_max ?? matchedModel.rpm_max_rated ?? 260),
+          rpm_max_rated: parseFloat(matchedModel.rpm_max ?? matchedModel.rpm_max_rated ?? 260),
+          vibration_max: parseFloat(matchedModel.vibration_max ?? matchedModel.vibration_limit ?? 2.2),
+          vibration_limit: parseFloat(matchedModel.vibration_max ?? matchedModel.vibration_limit ?? 2.2),
+        } : null;
 
         const profileData = {
           uid,
@@ -128,43 +154,46 @@ export default function AuthPage({ onLoginSuccess }) {
           profileData.companyName = companyName.trim() || "Tata Motors";
           profileData.adminRole = "OEM Engineer / Admin";
         } else {
-          profileData.companyName = selectedCompany || "Tata Motors";
-          profileData.vehicleModel = vehicleModel || (filteredModels[0]?.modelName ?? "Nexon EV");
-          profileData.vehicleId = vehicleId.trim() || "KA-01-EV-0001";
+          profileData.companyName = matchedModel?.manufacturer || selectedCompany || "Tata Motors";
+          profileData.vehicleModel = matchedModel?.modelName || vehicleModel || "Nexon EV";
+          profileData.vehicleId = vehicleId.trim() || `VEH-${cleanChassis.slice(-6) || "EV01"}`;
           profileData.chassisNumber = cleanChassis;
+          profileData.calibration = calibrationPayload;
 
-          if (matchedModel) {
-            profileData.calibration = {
-              modelName: matchedModel.modelName,
-              manufacturer: matchedModel.manufacturer,
-              voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 5.0,
-              voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 4.2,
-              current_nominal: parseFloat(matchedModel.current_nominal) || 0.25,
-              current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 0.95,
-              temp_nominal: parseFloat(matchedModel.temp_nominal) || 25.0,
-              temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 42.0,
-              rpm_max_rated: parseFloat(matchedModel.rpm_max_rated) || 250,
-            };
-          }
-
-          // DYNAMIC PROVISIONING IN FIREBASE REALTIME DATABASE
-          const chassisRtdbRef = ref(rtdb, cleanChassis);
+          // PROVISION AT THE EXACT PATH EXPECTED BY ESP32: /vehicles/{chassis}/live
+          const chassisRtdbRef = ref(rtdb, `vehicles/${cleanChassis}/live`);
           const rtdbSnap = await get(chassisRtdbRef);
           if (!rtdbSnap.exists()) {
             await set(chassisRtdbRef, {
               chassis: cleanChassis,
-              Voltage: parseFloat(matchedModel?.voltage_nominal ?? 5.0),
-              Current: parseFloat(matchedModel?.current_nominal ?? 0.25),
-              Temperature: parseFloat(matchedModel?.temp_nominal ?? 25.0),
-              motor_rpm: Math.round((matchedModel?.rpm_max_rated ?? 250) * 0.8),
-              ambient_temp: 25.0,
-              ambient_humidity: 50.0,
+              Voltage: parseFloat(calibrationPayload?.voltage_nominal ?? 11.8),
+              Current: parseFloat(calibrationPayload?.current_nominal ?? 0.20),
+              Temperature: parseFloat(calibrationPayload?.temp_nominal ?? 28.0),
+              motor_rpm: Math.round((calibrationPayload?.rpm_max ?? 260) * 0.85),
+              ambient_temp: 26.4,
+              ambient_humidity: 52.0,
               vibration_x: 0.05,
               vibration_y: 0.08,
-              vibration_z: 9.82,
+              vibration_z: 9.81,
               timestamp: Date.now()
             });
           }
+
+          // Pre-bind session to backend engine
+          await fetch(`${API_BASE}/api/session/bind`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              userId: uid,
+              vehicleId: profileData.vehicleId,
+              vehicleModel: profileData.vehicleModel,
+              companyName: profileData.companyName,
+              email: profileData.email,
+              fullName: profileData.fullName,
+              chassisNumber: cleanChassis,
+              calibration: calibrationPayload,
+            }),
+          }).catch((err) => console.error("Initial session bind error:", err));
         }
 
         await setDoc(doc(db, "users", uid), profileData);
@@ -318,15 +347,11 @@ export default function AuthPage({ onLoginSuccess }) {
                         onChange={(e) => setSelectedCompany(e.target.value)}
                         className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:bg-white focus:outline-none focus:border-cyan-500"
                       >
-                        {availableCompanies.length === 0 ? (
-                          <option value="Tata Motors">Tata Motors</option>
-                        ) : (
-                          availableCompanies.map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))
-                        )}
+                        {availableCompanies.map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
                       </select>
                     </div>
 
@@ -340,7 +365,7 @@ export default function AuthPage({ onLoginSuccess }) {
                         className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-cyan-800 focus:bg-white focus:outline-none focus:border-cyan-500"
                       >
                         {filteredModels.length === 0 ? (
-                          <option value="">No models registered</option>
+                          <option value="Nexon EV">Nexon EV</option>
                         ) : (
                           filteredModels.map((m) => (
                             <option key={m.id} value={m.modelName}>

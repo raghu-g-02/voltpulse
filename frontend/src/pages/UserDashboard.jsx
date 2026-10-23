@@ -4,7 +4,7 @@ import Navbar from "../components/Navbar";
 import EditProfileModal from "../components/EditProfileModal";
 import { useAuth } from "../context/AuthContext";
 import { useTelemetry } from "../context/TelemetryContext";
-import { doc, onSnapshot } from "firebase/firestore";
+import { collection, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
 import { 
   Zap, Activity, Gauge, Thermometer, Wind, Droplets, 
@@ -36,23 +36,44 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const [filterType, setFilterType] = useState("ALL");
   const [sortOrder, setSortOrder] = useState("DESC");
 
-  // Dynamic live sync with Admin-configured vehicle_models collection
+  // Dynamic real-time sync with Admin-calibrated vehicle_models collection
   const [liveModelCal, setLiveModelCal] = useState(null);
 
   useEffect(() => {
-    const modelName = userProfile?.vehicleModel || "Nexon EV";
-    const docId = modelName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const cleanChassis = (userProfile?.chassisNumber || "MAT612089N1A23456").trim().toUpperCase();
+    const userModel = (userProfile?.vehicleModel || "").trim().toLowerCase();
 
-    const unsub = onSnapshot(doc(db, "vehicle_models", docId), (docSnap) => {
-      if (docSnap.exists()) {
-        setLiveModelCal(docSnap.data());
+    const unsub = onSnapshot(collection(db, "vehicle_models"), (snapshot) => {
+      let matched = null;
+
+      // 1. Prioritize model explicitly assigned to this VIN
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        const assigned = Array.isArray(data.assignedChassis) ? data.assignedChassis : [];
+        if (assigned.some((c) => String(c).trim().toUpperCase() === cleanChassis)) {
+          matched = { id: docSnap.id, ...data };
+        }
+      });
+
+      // 2. Fallback to model name match
+      if (!matched) {
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          if ((data.modelName || "").trim().toLowerCase() === userModel || docSnap.id.toLowerCase() === userModel) {
+            matched = { id: docSnap.id, ...data };
+          }
+        });
       }
-    }, (err) => console.warn("Live model listener fallback:", err));
+
+      if (matched) {
+        setLiveModelCal(matched);
+      }
+    }, (err) => console.warn("Live models catalog listener error:", err));
 
     return () => unsub();
-  }, [userProfile?.vehicleModel]);
+  }, [userProfile?.chassisNumber, userProfile?.vehicleModel]);
 
-  // Read active thresholds set by Admin
+  // Read active thresholds set by OEM Admin
   const appliedThresh = agentResult?.applied_thresholds || {};
   const activeCal = liveModelCal || userProfile?.calibration || {};
 
@@ -74,15 +95,19 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const vib_y = parseFloat(telemetry?.vibration_y ?? 0.08);
   const vib_z = parseFloat(telemetry?.vibration_z ?? 9.81);
 
+  // Dynamic vibration (eliminates static 1G gravity tilt)
+  const dynamicVib = Math.max(0.0, Math.abs(Math.sqrt(vib_x**2 + vib_y**2 + vib_z**2) - 9.81));
+
   const diagnosis = agentResult?.diagnosis;
   const isFaultActive = diagnosis?.fault_class !== 0 && diagnosis?.fault_class !== undefined;
   const faultLabel = diagnosis?.diagnosis_label || "Nominal Operation";
   const driverSuggestion = diagnosis?.driver_suggestion || "Powertrain operating nominally within calibrated limits. Safe and fine to drive.";
 
-  // Parameter breach flags
+  // Individual channel breach indicators
   const isVBreached = (v < vMin || v > vMax) && v > 0.2;
   const isIBreached = i >= iMax;
   const isTBreached = t >= tMax;
+  const isVibBreached = dynamicVib >= vibMax;
 
   // Filter & Sort Fault History
   let displayedFaults = [...faultHistory];
@@ -290,7 +315,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
             </div>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>{isSimulating ? `Demo Override (${simulationCountdown}s)` : "Live RTDB Stream"}</span>
+              <span>{isSimulating ? `Demo Override (${simulationCountdown}s)` : "Live RTDB Stream Active"}</span>
             </span>
           </div>
 
@@ -382,13 +407,15 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
             </div>
 
             {/* Dynamic Vibration */}
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            <div className={`rounded-2xl p-4 border transition ${
+              isVibBreached ? "bg-rose-50 border-rose-300" : "bg-slate-50 border-slate-200"
+            }`}>
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>Dynamic Vibration</span>
-                <Waves className="w-4 h-4 text-purple-600" />
+                <Waves className={`w-4 h-4 ${isVibBreached ? "text-rose-600" : "text-purple-600"}`} />
               </div>
-              <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-                {(Math.max(0.0, Math.abs(Math.sqrt(vib_x**2 + vib_y**2 + vib_z**2) - 9.81))).toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
+              <div className={`text-2xl font-black font-mono mt-2 ${isVibBreached ? "text-rose-700" : "text-slate-900"}`}>
+                {dynamicVib.toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
               </div>
               <div className="text-[11px] font-semibold text-slate-500 mt-1">
                 Limit: <strong className="text-slate-800">≤ {vibMax} m/s²</strong>

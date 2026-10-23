@@ -130,7 +130,7 @@ export function TelemetryProvider({ children }) {
       body: JSON.stringify({
         userId: userProfile.userId || "OWN-DEFAULT",
         vehicleId: userProfile.vehicleId || "VEH-DEFAULT",
-        vehicleModel: userProfile.vehicleModel || "3S Hardware Testbench (12V L298N)",
+        vehicleModel: userProfile.vehicleModel || "Nexon EV",
         email: userProfile.email,
         fullName: userProfile.fullName || "Vehicle Owner",
         chassisNumber: userChassis,
@@ -369,7 +369,6 @@ export function TelemetryProvider({ children }) {
         lastSpokenSignatureRef.current = "SAFE";
         return;
       }
-      // Speak recovery announcement when returning from a fault!
       if (lastSpokenSignatureRef.current !== null && lastSpokenSignatureRef.current !== "SAFE") {
         speakText("System recovered. All powertrain parameters have normalized. It is now safe and fine to drive.");
         lastSpokenSignatureRef.current = "SAFE";
@@ -409,6 +408,10 @@ export function TelemetryProvider({ children }) {
           if (data.source) setSource(data.source);
           if (typeof data.is_simulating === "boolean") {
             setIsSimulating(data.is_simulating);
+            if (!data.is_simulating && countdownIntervalRef.current) {
+              clearInterval(countdownIntervalRef.current);
+              setSimulationCountdown(0);
+            }
           }
         };
         ws.onerror = () => setSource("POLLING_FALLBACK");
@@ -434,6 +437,10 @@ export function TelemetryProvider({ children }) {
         if (data.source) setSource(data.source);
         if (typeof data.is_simulating === "boolean") {
           setIsSimulating(data.is_simulating);
+          if (!data.is_simulating && countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            setSimulationCountdown(0);
+          }
         }
       } catch (e) {
         setSource("DISCONNECTED");
@@ -475,7 +482,6 @@ export function TelemetryProvider({ children }) {
     setIsSimulating(true);
     setSimulationCountdown(10);
 
-    // Frontend 10-second countdown ticker
     countdownIntervalRef.current = setInterval(() => {
       setSimulationCountdown((prev) => {
         if (prev <= 1) {

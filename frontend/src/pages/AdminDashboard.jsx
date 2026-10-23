@@ -14,7 +14,12 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "http://localhost:8000").repl
 
 export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubView = "home" }) {
   const { userProfile } = useAuth();
-  const [adminSubView, setAdminSubView] = useState(initialSubView); // "home" | "fleet" | "models"
+  const [adminSubView, setAdminSubView] = useState(initialSubView);
+
+  // Synchronize when parent prop changes
+  useEffect(() => {
+    setAdminSubView(initialSubView);
+  }, [initialSubView]);
 
   const [fleetUsers, setFleetUsers] = useState([]);
   const [vehicleModels, setVehicleModels] = useState([]);
@@ -162,8 +167,11 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
     URL.revokeObjectURL(url);
   };
 
-  // Find assigned model calibration for the inspected vehicle
+  // Find assigned model calibration for the inspected vehicle (Match by VIN first)
   const activeModelCalibration = vehicleModels.find(
+    (m) => Array.isArray(m.assignedChassis) && 
+           m.assignedChassis.some((c) => String(c).trim().toUpperCase() === inspectedVehicle?.chassisNumber?.trim().toUpperCase())
+  ) || vehicleModels.find(
     (m) => m.modelName?.toLowerCase() === inspectedVehicle?.vehicleModel?.toLowerCase() || m.id === inspectedVehicle?.vehicleModel
   ) || vehicleModels[0];
 
@@ -189,7 +197,7 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
             if (view === "fleet") setAdminSubView("fleet");
             if (view === "models") setAdminSubView("models");
             if (view === "about") onOpenAbout();
-          }}
+          }} 
         />
 
         {inspectedVehicle ? (
@@ -208,7 +216,7 @@ export default function AdminDashboard({ onBackToHome, onOpenAbout, initialSubVi
         ) : adminSubView === "models" ? (
           <VehicleModelManager
             vehicleModels={vehicleModels}
-            manufacturerName={userProfile?.companyName || userProfile?.fullName || "Automotive OEM"}
+            manufacturerName={userProfile?.companyName || userProfile?.fullName || "Tata Motors"}
             onRefresh={fetchVehicleModels}
             onBack={() => setAdminSubView("home")}
           />

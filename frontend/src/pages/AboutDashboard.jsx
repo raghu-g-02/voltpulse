@@ -1,5 +1,5 @@
 // src/pages/AboutDashboard.jsx
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import Navbar from "../components/Navbar";
 import EditProfileModal from "../components/EditProfileModal";
 import { 
@@ -20,7 +20,7 @@ export default function AboutDashboard({ onBackToHome, onOpenConsole }) {
           currentView="about" 
           onNavigate={(view) => {
             if (view === "home") onBackToHome();
-            if (view === "console" || view === "cockpit" || view === "fleet" || view === "models") onOpenConsole();
+            if (view === "console" || view === "cockpit" || view === "fleet" || view === "models") onOpenConsole(view);
           }} 
         />
 
@@ -63,7 +63,7 @@ export default function AboutDashboard({ onBackToHome, onOpenConsole }) {
               </span>
               <div>
                 <h3 className="text-lg font-bold text-slate-900">
-                  {isAdmin ? (userProfile?.companyName || "VoltPulse Lab Rig") : (userProfile?.vehicleModel || "3S Hardware Testbench")}
+                  {isAdmin ? (userProfile?.companyName || "Tata Motors") : (userProfile?.vehicleModel || "Nexon EV")}
                 </h3>
                 <span className={`text-xs font-mono font-bold px-2.5 py-0.5 rounded-full border ${
                   isAdmin ? "bg-rose-50 text-rose-700 border-rose-200" : "bg-cyan-50 text-cyan-700 border border-cyan-200"
@@ -86,7 +86,7 @@ export default function AboutDashboard({ onBackToHome, onOpenConsole }) {
                   <span className="text-[11px] text-slate-400 font-semibold block uppercase">Organization Name</span>
                   <div className="text-sm font-bold text-slate-800 mt-1 flex items-center gap-2">
                     <Building className="w-4 h-4 text-slate-400" />
-                    <span>{userProfile?.companyName || "VoltPulse Lab Rig"}</span>
+                    <span>{userProfile?.companyName || "Tata Motors"}</span>
                   </div>
                 </div>
 
@@ -112,7 +112,7 @@ export default function AboutDashboard({ onBackToHome, onOpenConsole }) {
                   <span className="text-[11px] text-slate-400 font-semibold block uppercase">Vehicle Model</span>
                   <div className="text-sm font-bold text-slate-800 mt-1 flex items-center gap-2">
                     <Car className="w-4 h-4 text-slate-400" />
-                    <span>{userProfile?.vehicleModel || "3S Hardware Testbench (12V L298N)"}</span>
+                    <span>{userProfile?.vehicleModel || "Nexon EV"}</span>
                   </div>
                 </div>
 
@@ -161,7 +161,6 @@ export default function AboutDashboard({ onBackToHome, onOpenConsole }) {
         </div>
       </div>
 
-      {/* Edit Profile Modal linking directly to Firestore Vehicle Models */}
       <EditProfileModal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} />
     </div>
   );
