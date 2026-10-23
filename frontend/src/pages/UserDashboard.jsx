@@ -103,7 +103,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const faultLabel = diagnosis?.diagnosis_label || "Nominal Operation";
   const driverSuggestion = diagnosis?.driver_suggestion || "Powertrain operating nominally within calibrated limits. Safe and fine to drive.";
 
-  // Parameter breach flags
+  // Individual channel breach indicators
   const isVBreached = (v < vMin || v > vMax) && v > 0.2;
   const isIBreached = i >= iMax;
   const isTBreached = t >= tMax;
@@ -304,14 +304,14 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           </div>
         </div>
 
-        {/* 10-Channel Live Sensor Readings (Cleaned: Values and Designations Only) */}
+        {/* 10-Channel Live Sensor Readings vs. OEM Envelopes */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
           <div className="flex justify-between items-center pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-900">
-                Live Sensor Telemetry
+                Live Sensor Telemetry vs. OEM Thresholds
               </h2>
-              <p className="text-xs text-slate-400">Real-time parameters streamed directly from testbench</p>
+              <p className="text-xs text-slate-400">Values outside your model's safe range turn red automatically</p>
             </div>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
@@ -331,6 +331,9 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className={`text-2xl font-black font-mono mt-2 ${isVBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {v.toFixed(2)} <span className="text-sm font-normal text-slate-500">V</span>
               </div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Safe: <strong className="text-slate-800">{vMin}V – {vMax}V</strong>
+              </div>
             </div>
 
             {/* Current */}
@@ -344,6 +347,9 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className={`text-2xl font-black font-mono mt-2 ${isIBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {i.toFixed(2)} <span className="text-sm font-normal text-slate-500">A</span>
               </div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Cutoff: <strong className="text-slate-800">≥ {iMax} A</strong>
+              </div>
             </div>
 
             {/* RPM */}
@@ -352,8 +358,11 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
                 <span>LM393 Tachometer</span>
                 <Gauge className="w-4 h-4 text-indigo-600" />
               </div>
-              <div className="text-2xl font-black font-mono mt-2">
+              <div className="text-2xl font-black font-mono text-slate-900 mt-2">
                 {rpm} <span className="text-sm font-normal text-slate-500">RPM</span>
+              </div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Rated Max: <strong className="text-slate-800">{rpmMax} RPM</strong>
               </div>
             </div>
 
@@ -368,6 +377,9 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className={`text-2xl font-black font-mono mt-2 ${isTBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {t.toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
               </div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Thermal Cutoff: <strong className="text-slate-800">≥ {tMax} °C</strong>
+              </div>
             </div>
 
             {/* Ambient Temp */}
@@ -379,6 +391,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-2xl font-black font-mono text-slate-900 mt-2">
                 {amb_t.toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
               </div>
+              <div className="text-[11px] text-slate-400 mt-1">Ambient Weather</div>
             </div>
 
             {/* Ambient Humidity */}
@@ -390,6 +403,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-2xl font-black font-mono text-slate-900 mt-2">
                 {amb_h.toFixed(0)} <span className="text-sm font-normal text-slate-500">%</span>
               </div>
+              <div className="text-[11px] text-slate-400 mt-1">Relative Moisture</div>
             </div>
 
             {/* Dynamic Vibration */}
@@ -403,6 +417,9 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className={`text-2xl font-black font-mono mt-2 ${isVibBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {dynamicVib.toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
               </div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Limit: <strong className="text-slate-800">≤ {vibMax} m/s²</strong>
+              </div>
             </div>
 
             {/* Z Gravity */}
@@ -414,6 +431,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-2xl font-black font-mono text-slate-900 mt-2">
                 {vib_z.toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
               </div>
+              <div className="text-[11px] text-slate-400 mt-1">Earth Baseline: ~9.81 m/s²</div>
             </div>
           </div>
         </div>
