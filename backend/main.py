@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
-from agents import orchestrator, DEFAULT_DEMO_CALIBRATION
+from agents import orchestrator, DEFAULT_HARDWARE_CALIBRATION
 
 app = FastAPI(title="VoltPulse AI Multi-Tenant Concurrent Engine")
 
@@ -24,7 +24,7 @@ active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
 vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
 
-# Exact Singapore regional endpoint from Firebase Console
+# Singapore regional Firebase Realtime Database
 FIREBASE_RTDB_BASE = os.getenv(
     "FIREBASE_DATABASE_URL", 
     "https://major-pro-8b1c9-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -60,13 +60,13 @@ def read_root():
 @app.post("/api/session/bind")
 def bind_session(req: SessionBindRequest):
     chassis = req.chassisNumber.strip().upper()
-    cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_DEMO_CALIBRATION
+    cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_HARDWARE_CALIBRATION
     
     active_vehicle_sessions[chassis] = {
         "userId": req.userId,
         "vehicleId": req.vehicleId,
         "vehicleModel": req.vehicleModel,
-        "companyName": req.companyName or "Tata Motors",
+        "companyName": req.companyName or "VoltPulse Lab Rig",
         "email": req.email,
         "fullName": req.fullName,
         "chassisNumber": chassis,
@@ -102,10 +102,13 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
 
-    if chassis in data and isinstance(data[chassis], dict):
+    # Handle unnesting
+    if "live" in data and isinstance(data["live"], dict):
+        data = data["live"]
+    elif chassis in data and isinstance(data[chassis], dict):
         data = data[chassis]
-    elif "telemetry" in data and isinstance(data["telemetry"], dict):
-        data = data["telemetry"]
+        if "live" in data and isinstance(data["live"], dict):
+            data = data["live"]
 
     lower_map = {str(k).lower(): v for k, v in data.items() if not isinstance(v, (dict, list))}
 
@@ -121,7 +124,7 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
                 "ambient_humidity": float(lower_map.get("ambient_humidity", 50.0)),
                 "vibration_x": float(lower_map.get("vibration_x", 0.05)),
                 "vibration_y": float(lower_map.get("vibration_y", 0.08)),
-                "vibration_z": float(lower_map.get("vibration_z", 9.82)),
+                "vibration_z": float(lower_map.get("vibration_z", 9.81)),
                 "chassis": chassis,
             }
         except (ValueError, TypeError):
@@ -129,10 +132,16 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     return None
 
 def fetch_firebase_telemetry(chassis: str) -> dict:
-    """Dynamically queries Realtime Database for ANY registered chassis."""
+    """
+    Dynamically fetches live telemetry from Firebase RTDB.
+    Primary Path matches your ESP32 target: /vehicles/{chassis}/live.json
+    """
     clean_chassis = chassis.strip().upper()
     lookup_paths = [
+        f"/vehicles/{clean_chassis}/live.json",   # Exact match for your ESP32 code
+        f"/vehicles/{clean_chassis}.json",
         f"/{clean_chassis}.json",
+        f"/{clean_chassis}/live.json",
         f"/telemetry/{clean_chassis}.json",
         f"/.json"
     ]
@@ -145,7 +154,7 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
                 extracted = _extract_telemetry_fields(resp.json(), clean_chassis)
                 if extracted is not None:
                     return extracted
-        except Exception as e:
+        except Exception:
             continue
 
     return {
@@ -157,7 +166,7 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
         "ambient_humidity": 50.0,
         "vibration_x": 0.05,
         "vibration_y": 0.08,
-        "vibration_z": 9.82,
+        "vibration_z": 9.81,
         "chassis": clean_chassis,
     }
 
@@ -175,9 +184,9 @@ def get_latest_state(chassis: str):
     c = chassis.strip().upper()
     session = active_vehicle_sessions.get(c, {
         "chassisNumber": c,
-        "email": "owner@voltpulse.io",
-        "fullName": "Vehicle Owner",
-        "calibration": DEFAULT_DEMO_CALIBRATION,
+        "email": "engineer@voltpulse.io",
+        "fullName": "Hardware Engineer",
+        "calibration": DEFAULT_HARDWARE_CALIBRATION,
     })
 
     sim = active_simulations.get(c)
@@ -193,69 +202,77 @@ def get_latest_state(chassis: str):
 
 @app.post("/api/simulate/{chassis}/{fault_class}")
 def simulate_fault(chassis: str, fault_class: int):
+    """
+    Allows executing a live fault demo from the UI dashboard
+    calibrated to the 3S 18650 12V testbench.
+    """
     c = chassis.strip().upper()
     session = active_vehicle_sessions.get(c, {
         "chassisNumber": c,
-        "calibration": DEFAULT_DEMO_CALIBRATION,
+        "calibration": DEFAULT_HARDWARE_CALIBRATION,
     })
-    cal = session.get("calibration", DEFAULT_DEMO_CALIBRATION)
+    cal = session.get("calibration", DEFAULT_HARDWARE_CALIBRATION)
 
-    v_nom = float(cal.get("voltage_nominal", 5.0))
-    v_sag = float(cal.get("voltage_sag_limit", 4.2))
-    i_crit = float(cal.get("current_overload_limit", 0.95))
-    t_crit = float(cal.get("temp_critical_limit", 42.0))
-    rpm_max = float(cal.get("rpm_max_rated", 250))
+    v_nom = float(cal.get("voltage_nominal", 11.8))
+    v_sag = float(cal.get("voltage_sag_limit", 9.8))
+    i_crit = float(cal.get("current_overload_limit", 0.85))
+    t_crit = float(cal.get("temp_critical_limit", 38.0))
+    rpm_max = float(cal.get("rpm_max_rated", 260))
 
     if fault_class == 0:
+        # Nominal 3S operation
         sim_data = {
             "Voltage": v_nom,
-            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
-            "Temperature": 28.0,
-            "motor_rpm": round(rpm_max * 0.8),
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-            "vibration_x": 0.05,
-            "vibration_y": 0.08,
-            "vibration_z": 9.82,
+            "Current": round(float(cal.get("current_nominal", 0.20)), 2),
+            "Temperature": 28.5,
+            "motor_rpm": round(rpm_max * 0.85),
+            "ambient_temp": 26.4,
+            "ambient_humidity": 52.0,
+            "vibration_x": 0.14,
+            "vibration_y": 0.09,
+            "vibration_z": 9.81,
             "chassis": c,
         }
     elif fault_class == 1:
+        # Motor Overload / Jam: Current spikes to 1.15A while RPM drops to 30
         sim_data = {
-            "Voltage": v_nom,
-            "Current": round(i_crit * 1.35, 2),
+            "Voltage": v_nom - 0.4,
+            "Current": round(i_crit * 1.35, 2), # ~1.15 A
             "Temperature": 32.0,
-            "motor_rpm": round(rpm_max * 0.45),
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-            "vibration_x": 0.25,
-            "vibration_y": 0.40,
-            "vibration_z": 9.82,
+            "motor_rpm": 25.0,
+            "ambient_temp": 26.4,
+            "ambient_humidity": 52.0,
+            "vibration_x": 0.45,
+            "vibration_y": 0.60,
+            "vibration_z": 9.81,
             "chassis": c,
         }
     elif fault_class == 2:
+        # Inverter Voltage Sag: Voltage drops below 9.8V cutoff
         sim_data = {
-            "Voltage": round(v_sag * 0.80, 2),
-            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
-            "Temperature": 30.0,
-            "motor_rpm": round(rpm_max * 0.6),
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-            "vibration_x": 0.05,
-            "vibration_y": 0.08,
-            "vibration_z": 9.82,
+            "Voltage": round(v_sag - 0.60, 2), # ~9.20 V
+            "Current": 0.24,
+            "Temperature": 29.5,
+            "motor_rpm": round(rpm_max * 0.55),
+            "ambient_temp": 26.4,
+            "ambient_humidity": 52.0,
+            "vibration_x": 0.12,
+            "vibration_y": 0.10,
+            "vibration_z": 9.81,
             "chassis": c,
         }
     elif fault_class == 3:
+        # Thermal Runaway: Pack temperature reaches 41.5°C
         sim_data = {
             "Voltage": v_nom,
-            "Current": round(float(cal.get("current_nominal", 0.25)), 2),
-            "Temperature": round(t_crit + 8.5, 1),
-            "motor_rpm": round(rpm_max * 0.5),
-            "ambient_temp": 25.0,
-            "ambient_humidity": 50.0,
-            "vibration_x": 0.05,
-            "vibration_y": 0.08,
-            "vibration_z": 9.82,
+            "Current": 0.22,
+            "Temperature": round(t_crit + 3.5, 1), # ~41.5 °C
+            "motor_rpm": round(rpm_max * 0.8),
+            "ambient_temp": 26.4,
+            "ambient_humidity": 52.0,
+            "vibration_x": 0.15,
+            "vibration_y": 0.12,
+            "vibration_z": 9.81,
             "chassis": c,
         }
     else:
@@ -269,15 +286,15 @@ def simulate_fault(chassis: str, fault_class: int):
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
     c = chassis.strip().upper()
-    print(f"[WebSocket Connected] Live stream established for chassis: {c}")
+    print(f"[WebSocket Connected] Live stream established for testbench: {c}")
 
     try:
         while True:
             session = active_vehicle_sessions.get(c, {
                 "chassisNumber": c,
-                "email": "owner@voltpulse.io",
-                "fullName": "Vehicle Owner",
-                "calibration": DEFAULT_DEMO_CALIBRATION,
+                "email": "engineer@voltpulse.io",
+                "fullName": "Hardware Engineer",
+                "calibration": DEFAULT_HARDWARE_CALIBRATION,
             })
 
             sim = active_simulations.get(c)
@@ -294,12 +311,12 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
                 "source": src,
                 "telemetry": raw_tel,
                 "agent_result": agent_res,
-                "calibration": session.get("calibration", DEFAULT_DEMO_CALIBRATION),
+                "calibration": session.get("calibration", DEFAULT_HARDWARE_CALIBRATION),
             }
 
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
-        print(f"[WebSocket Disconnected] Client closed for chassis: {c}")
+        print(f"[WebSocket Disconnected] Client closed for testbench: {c}")
     except Exception as e:
         print(f"[WebSocket Error] {e}")

@@ -10,17 +10,18 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
+  // Default calibrated form matching your 3S 18650 battery + TT Motor rig
   const initialForm = {
-    modelName: "",
-    manufacturer: manufacturerName || "Tata Motors",
-    voltage_nominal: 350.0,
-    voltage_sag_limit: 300.0,
-    current_nominal: 45.0,
-    current_overload_limit: 220.0,
-    temp_nominal: 30.0,
-    temp_critical_limit: 62.0,
-    rpm_max_rated: 12000,
-    chassisInput: "",
+    modelName: "3S Hardware Testbench (12V L298N)",
+    manufacturer: manufacturerName || "VoltPulse Lab Rig",
+    voltage_nominal: 11.8,
+    voltage_sag_limit: 9.8,
+    current_nominal: 0.20,
+    current_overload_limit: 0.85,
+    temp_nominal: 28.0,
+    temp_critical_limit: 38.0,
+    rpm_max_rated: 260,
+    chassisInput: "MAT612089N1A23456",
   };
 
   const [formData, setFormData] = useState(initialForm);
@@ -30,14 +31,14 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     setEditingId(model.id);
     setFormData({
       modelName: model.modelName || "",
-      manufacturer: model.manufacturer || manufacturerName || "Tata Motors",
-      voltage_nominal: model.voltage_nominal ?? 350.0,
-      voltage_sag_limit: model.voltage_sag_limit ?? 300.0,
-      current_nominal: model.current_nominal ?? 45.0,
-      current_overload_limit: model.current_overload_limit ?? 220.0,
-      temp_nominal: model.temp_nominal ?? 30.0,
-      temp_critical_limit: model.temp_critical_limit ?? 62.0,
-      rpm_max_rated: model.rpm_max_rated ?? 12000,
+      manufacturer: model.manufacturer || manufacturerName || "VoltPulse Lab Rig",
+      voltage_nominal: model.voltage_nominal ?? 11.8,
+      voltage_sag_limit: model.voltage_sag_limit ?? 9.8,
+      current_nominal: model.current_nominal ?? 0.20,
+      current_overload_limit: model.current_overload_limit ?? 0.85,
+      temp_nominal: model.temp_nominal ?? 28.0,
+      temp_critical_limit: model.temp_critical_limit ?? 38.0,
+      rpm_max_rated: model.rpm_max_rated ?? 260,
       chassisInput: Array.isArray(model.assignedChassis) ? model.assignedChassis.join(", ") : "",
     });
     setIsAdding(true);
@@ -67,14 +68,14 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     const payload = {
       id: docId,
       modelName: formData.modelName.trim(),
-      manufacturer: formData.manufacturer.trim() || manufacturerName || "Tata Motors",
-      voltage_nominal: parseFloat(formData.voltage_nominal) || 5.0,
-      voltage_sag_limit: parseFloat(formData.voltage_sag_limit) || 4.2,
-      current_nominal: parseFloat(formData.current_nominal) || 0.25,
-      current_overload_limit: parseFloat(formData.current_overload_limit) || 0.95,
-      temp_nominal: parseFloat(formData.temp_nominal) || 27.0,
-      temp_critical_limit: parseFloat(formData.temp_critical_limit) || 42.0,
-      rpm_max_rated: parseFloat(formData.rpm_max_rated) || 250,
+      manufacturer: formData.manufacturer.trim() || manufacturerName || "VoltPulse Lab Rig",
+      voltage_nominal: parseFloat(formData.voltage_nominal) || 11.8,
+      voltage_sag_limit: parseFloat(formData.voltage_sag_limit) || 9.8,
+      current_nominal: parseFloat(formData.current_nominal) || 0.20,
+      current_overload_limit: parseFloat(formData.current_overload_limit) || 0.85,
+      temp_nominal: parseFloat(formData.temp_nominal) || 28.0,
+      temp_critical_limit: parseFloat(formData.temp_critical_limit) || 38.0,
+      rpm_max_rated: parseFloat(formData.rpm_max_rated) || 260,
       assignedChassis: chassisArray,
       updatedAt: Date.now(),
     };
@@ -91,7 +92,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
       handleCancel();
       if (onRefresh) onRefresh();
     } catch (err) {
-      console.error("Failed to save vehicle model:", err);
+      console.error("Failed to save model:", err);
       alert("Error saving vehicle model to database.");
     } finally {
       setSaving(false);
@@ -99,7 +100,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
   };
 
   const handleDeleteModel = async (modelId, name) => {
-    const confirmDel = window.confirm(`Are you sure you want to delete vehicle model "${name}"?`);
+    const confirmDel = window.confirm(`Are you sure you want to delete model "${name}"?`);
     if (!confirmDel) return;
 
     try {
@@ -111,8 +112,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
   };
 
   return (
-    <div className="space-y-4">
-      {/* RETURN BUTTON */}
+    <div className="space-y-4 font-sans">
       {onBack && (
         <button
           onClick={onBack}
@@ -131,7 +131,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
               Vehicle Models & Calibration Catalog
             </h2>
             <p className="text-xs text-slate-500">
-              Define vehicle models, tune threshold envelopes, and pre-assign authorized Chassis Numbers (VINs).
+              Tune threshold envelopes for 3S 18650 testbenches and production EV models.
             </p>
           </div>
 
@@ -167,7 +167,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Tata Motors"
+                  placeholder="e.g. VoltPulse Lab Rig"
                   value={formData.manufacturer}
                   onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
                   className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:border-cyan-500"
@@ -179,7 +179,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Nexon EV"
+                  placeholder="e.g. 3S Hardware Testbench (12V L298N)"
                   value={formData.modelName}
                   onChange={(e) => setFormData({ ...formData, modelName: e.target.value })}
                   className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-cyan-500 font-bold"
@@ -272,11 +272,11 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
             <div className="pt-2">
               <label className="text-[10px] font-semibold text-cyan-800 uppercase block mb-1 flex items-center gap-1.5">
                 <Cpu className="w-3.5 h-3.5 text-cyan-600" />
-                <span>Assigned Chassis Numbers / VINs for this Model (Comma or Line Separated)</span>
+                <span>Assigned Chassis Numbers (VINs) for this Model</span>
               </label>
               <textarea
                 rows={2}
-                placeholder="e.g. MAT612089N1A23456, VIN-TATA-001"
+                placeholder="e.g. MAT612089N1A23456"
                 value={formData.chassisInput}
                 onChange={(e) => setFormData({ ...formData, chassisInput: e.target.value })}
                 className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs text-slate-900 focus:outline-none focus:border-cyan-500"
@@ -306,7 +306,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
 
         {vehicleModels.length === 0 ? (
           <div className="py-8 text-center text-xs text-slate-400">
-            No vehicle models defined. Click "Add Vehicle Model" above to configure your first model.
+            No vehicle models defined. Click "Add Vehicle Model" above.
           </div>
         ) : (
           <div className="overflow-x-auto">

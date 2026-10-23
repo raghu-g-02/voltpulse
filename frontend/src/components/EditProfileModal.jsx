@@ -1,4 +1,4 @@
-// frontend/src/components/EditProfileModal.jsx
+// src/components/EditProfileModal.jsx
 import React, { useState, useEffect, useMemo } from "react";
 import { doc, updateDoc, collection, getDocs } from "firebase/firestore";
 import { ref, set, get } from "firebase/database";
@@ -36,14 +36,14 @@ export default function EditProfileModal({ isOpen, onClose }) {
           list.push({
             id: docSnap.id,
             modelName: data.modelName || data.model || data.name || docSnap.id,
-            manufacturer: data.manufacturer || data.companyName || data.company || "Tata Motors",
-            voltage_nominal: data.voltage_nominal ?? 3.5,
-            voltage_sag_limit: data.voltage_sag_limit ?? 6.0,
-            current_nominal: data.current_nominal ?? 0.25,
-            current_overload_limit: data.current_overload_limit ?? 1.1,
-            temp_nominal: data.temp_nominal ?? 25.0,
-            temp_critical_limit: data.temp_critical_limit ?? 30.0,
-            rpm_max_rated: data.rpm_max_rated ?? 250,
+            manufacturer: data.manufacturer || data.companyName || "VoltPulse Lab Rig",
+            voltage_nominal: data.voltage_nominal ?? 11.8,
+            voltage_sag_limit: data.voltage_sag_limit ?? 9.8,
+            current_nominal: data.current_nominal ?? 0.20,
+            current_overload_limit: data.current_overload_limit ?? 0.85,
+            temp_nominal: data.temp_nominal ?? 28.0,
+            temp_critical_limit: data.temp_critical_limit ?? 38.0,
+            rpm_max_rated: data.rpm_max_rated ?? 260,
             assignedChassis: Array.isArray(data.assignedChassis) ? data.assignedChassis : [],
             ...data
           });
@@ -66,7 +66,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
           if (matchedByChassis) {
             setSelectedCompany(matchedByChassis.manufacturer);
             setVehicleModel(matchedByChassis.modelName);
-            setChassisNotice(`Auto-detected: ${matchedByChassis.manufacturer} ${matchedByChassis.modelName}`);
+            setChassisNotice(`✓ Auto-detected: ${matchedByChassis.manufacturer} ${matchedByChassis.modelName}`);
           } else {
             const userComp = (userProfile.companyName || "").trim().toLowerCase();
             const matchedComp = list.find((m) => {
@@ -74,7 +74,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
               return mComp === userComp || mComp.includes(userComp) || userComp.includes(mComp);
             });
 
-            const resolvedCompany = matchedComp ? matchedComp.manufacturer : (list[0]?.manufacturer || "Tata Motors");
+            const resolvedCompany = matchedComp ? matchedComp.manufacturer : (list[0]?.manufacturer || "VoltPulse Lab Rig");
             setSelectedCompany(resolvedCompany);
 
             const companyModels = list.filter(
@@ -112,7 +112,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
       }
     });
     const result = Array.from(compSet);
-    return result.length > 0 ? result : ["Tata Motors"];
+    return result.length > 0 ? result : ["VoltPulse Lab Rig"];
   }, [allModels]);
 
   const filteredModels = useMemo(() => {
@@ -155,7 +155,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
     if (matched) {
       setSelectedCompany(matched.manufacturer);
       setVehicleModel(matched.modelName);
-      setChassisNotice(`Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
+      setChassisNotice(`✓ Auto-detected: ${matched.manufacturer} ${matched.modelName}`);
     } else {
       setChassisNotice("");
     }
@@ -179,13 +179,13 @@ export default function EditProfileModal({ isOpen, onClose }) {
       ? {
           modelName: matchedModel.modelName,
           manufacturer: matchedModel.manufacturer,
-          voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 3.5,
-          voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 6.0,
-          current_nominal: parseFloat(matchedModel.current_nominal) || 0.25,
-          current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 1.1,
-          temp_nominal: parseFloat(matchedModel.temp_nominal) || 25.0,
-          temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 30.0,
-          rpm_max_rated: parseFloat(matchedModel.rpm_max_rated) || 250,
+          voltage_nominal: parseFloat(matchedModel.voltage_nominal) || 11.8,
+          voltage_sag_limit: parseFloat(matchedModel.voltage_sag_limit) || 9.8,
+          current_nominal: parseFloat(matchedModel.current_nominal) || 0.20,
+          current_overload_limit: parseFloat(matchedModel.current_overload_limit) || 0.85,
+          temp_nominal: parseFloat(matchedModel.temp_nominal) || 28.0,
+          temp_critical_limit: parseFloat(matchedModel.temp_critical_limit) || 38.0,
+          rpm_max_rated: parseFloat(matchedModel.rpm_max_rated) || 260,
         }
       : null;
 
@@ -206,21 +206,21 @@ export default function EditProfileModal({ isOpen, onClose }) {
       const userRef = doc(db, "users", currentUser.uid);
       await updateDoc(userRef, updatedProfile);
 
-      // 2. Provision new chassis node in Realtime Database if missing
-      const chassisRtdbRef = ref(rtdb, cleanChassis);
+      // 2. Provision new chassis node in Realtime Database at /vehicles/{chassis}/live
+      const chassisRtdbRef = ref(rtdb, `vehicles/${cleanChassis}/live`);
       const snap = await get(chassisRtdbRef);
       if (!snap.exists()) {
         await set(chassisRtdbRef, {
           chassis: cleanChassis,
-          Voltage: parseFloat(calibrationPayload?.voltage_nominal ?? 3.5),
-          Current: parseFloat(calibrationPayload?.current_nominal ?? 0.25),
-          Temperature: parseFloat(calibrationPayload?.temp_nominal ?? 25.0),
-          motor_rpm: Math.round((calibrationPayload?.rpm_max_rated ?? 250) * 0.8),
-          ambient_temp: 25.0,
-          ambient_humidity: 50.0,
-          vibration_x: 0.05,
-          vibration_y: 0.08,
-          vibration_z: 9.82,
+          Voltage: parseFloat(calibrationPayload?.voltage_nominal ?? 11.8),
+          Current: parseFloat(calibrationPayload?.current_nominal ?? 0.20),
+          Temperature: parseFloat(calibrationPayload?.temp_nominal ?? 28.0),
+          motor_rpm: Math.round((calibrationPayload?.rpm_max_rated ?? 260) * 0.85),
+          ambient_temp: 26.4,
+          ambient_humidity: 52.0,
+          vibration_x: 0.14,
+          vibration_y: 0.09,
+          vibration_z: 9.81,
           timestamp: Date.now()
         });
       }
@@ -257,7 +257,7 @@ export default function EditProfileModal({ isOpen, onClose }) {
             </span>
             <div>
               <h3 className="text-sm font-bold text-slate-900">Edit Vehicle & Calibration Profile</h3>
-              <p className="text-[11px] text-slate-400">Linked to Firestore Manufacturer Database</p>
+              <p className="text-[11px] text-slate-400">Linked to 3S Testbench & Firestore Models</p>
             </div>
           </div>
           <button
