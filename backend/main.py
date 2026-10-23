@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
-from agents import orchestrator, DEFAULT_HARDWARE_CALIBRATION
+from agents import orchestrator, DEFAULT_MODEL_CALIBRATION
 
 app = FastAPI(title="VoltPulse AI Multi-Tenant Concurrent Engine")
 
@@ -24,7 +24,6 @@ vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
 simulation_tasks: Dict[str, asyncio.Task] = {}
 
-# Singapore regional Firebase Realtime Database
 FIREBASE_RTDB_BASE = os.getenv(
     "FIREBASE_DATABASE_URL", 
     "https://major-pro-8b1c9-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -47,6 +46,26 @@ class ModelSyncRequest(BaseModel):
     modelId: str
     modelData: Dict[str, Any]
 
+def find_calibration_for_chassis(chassis: str, requested_model: str = "") -> dict:
+    """Matches a chassis number to the Admin-calibrated model envelope."""
+    clean_chassis = chassis.strip().upper()
+
+    # 1. Match by pre-assigned VIN list in catalog
+    for m_id, m_data in vehicle_models_catalog.items():
+        assigned = m_data.get("assignedChassis", [])
+        if isinstance(assigned, list) and any(str(c).strip().toUpperCase() == clean_chassis for c in assigned):
+            return m_data
+
+    # 2. Match by model name
+    if requested_model:
+        norm_req = requested_model.strip().lower()
+        for m_id, m_data in vehicle_models_catalog.items():
+            if m_data.get("modelName", "").strip().lower() == norm_req or m_id.lower() == norm_req:
+                return m_data
+
+    # 3. Fallback to default model
+    return vehicle_models_catalog.get("nexon-ev", DEFAULT_MODEL_CALIBRATION)
+
 @app.get("/")
 def read_root():
     return {
@@ -61,19 +80,19 @@ def read_root():
 @app.post("/api/session/bind")
 def bind_session(req: SessionBindRequest):
     chassis = req.chassisNumber.strip().upper()
-    cal = req.calibration or vehicle_models_catalog.get(req.vehicleModel) or DEFAULT_HARDWARE_CALIBRATION
+    cal = find_calibration_for_chassis(chassis, req.vehicleModel)
     
     active_vehicle_sessions[chassis] = {
         "userId": req.userId,
         "vehicleId": req.vehicleId,
-        "vehicleModel": req.vehicleModel,
-        "companyName": req.companyName or "VoltPulse Lab Rig",
+        "vehicleModel": cal.get("modelName", req.vehicleModel),
+        "companyName": cal.get("manufacturer", req.companyName or "Tata Motors"),
         "email": req.email,
         "fullName": req.fullName,
         "chassisNumber": chassis,
         "calibration": cal,
     }
-    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel}")
+    print(f"[Session Bound] Chassis: {chassis} linked to Model: {cal.get('modelName')} (Limits: {cal.get('voltage_min')}V-{cal.get('voltage_max')}V, {cal.get('current_max')}A)")
     return {"status": "SUCCESS", "chassis": chassis, "calibration": cal}
 
 @app.post("/api/session/unbind")
@@ -86,23 +105,33 @@ def unbind_session(req: SessionUnbindRequest):
 
 @app.post("/api/models/sync")
 def sync_model(req: ModelSyncRequest):
+    """
+    Called whenever Admin saves/edits a model in VehicleModelManager.
+    Updates all vehicles tied to this model or its assigned VINs in memory.
+    """
     vehicle_models_catalog[req.modelId] = req.modelData
     updated_chassis = []
+
+    model_name = req.modelData.get("modelName", "").strip().lower()
+    assigned_vins = [str(c).strip().upper() for c in req.modelData.get("assignedChassis", [])]
+
     for c, sess in active_vehicle_sessions.items():
         if (
-            sess.get("vehicleModel", "").strip().lower() == req.modelData.get("modelName", "").strip().lower()
+            sess.get("vehicleModel", "").strip().lower() == model_name
+            or c in assigned_vins
             or sess.get("vehicleModel") == req.modelId
         ):
             sess["calibration"] = req.modelData
+            sess["vehicleModel"] = req.modelData.get("modelName", sess.get("vehicleModel"))
             updated_chassis.append(c)
 
+    print(f"[Model Synced by Admin] Model: {req.modelId} updated across active sessions: {updated_chassis}")
     return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
 def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
 
-    # Handle unnesting
     if "live" in data and isinstance(data["live"], dict):
         data = data["live"]
     elif chassis in data and isinstance(data[chassis], dict):
@@ -167,12 +196,11 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
     }
 
 async def revert_simulation_after_delay(chassis: str, delay_seconds: float = 10.0):
-    """Background coroutine that expires demo injection after 10 seconds."""
     try:
         await asyncio.sleep(delay_seconds)
         if chassis in active_simulations:
             del active_simulations[chassis]
-            print(f"[Simulation Auto-Reset] 10s expired for {chassis}. Automatically reverted to live Firebase RTDB.")
+            print(f"[Simulation Expired] Reverted {chassis} to live Firebase RTDB.")
     except asyncio.CancelledError:
         pass
 
@@ -188,12 +216,15 @@ def get_telemetry(chassis: str):
 @app.get("/api/state/latest/{chassis}")
 def get_latest_state(chassis: str):
     c = chassis.strip().upper()
-    session = active_vehicle_sessions.get(c, {
-        "chassisNumber": c,
-        "email": "engineer@voltpulse.io",
-        "fullName": "Hardware Engineer",
-        "calibration": DEFAULT_HARDWARE_CALIBRATION,
-    })
+    session = active_vehicle_sessions.get(c)
+    if not session:
+        cal = find_calibration_for_chassis(c)
+        session = {
+            "chassisNumber": c,
+            "email": "driver@voltpulse.io",
+            "fullName": "Vehicle Owner",
+            "calibration": cal,
+        }
 
     sim = active_simulations.get(c)
     if sim:
@@ -210,33 +241,25 @@ def get_latest_state(chassis: str):
 
 @app.post("/api/simulate/{chassis}/{fault_class}")
 async def simulate_fault(chassis: str, fault_class: int):
-    """
-    Overrides live telemetry with demo values for EXACTLY 10 SECONDS,
-    then automatically reverts back to live Firebase RTDB.
-    """
     c = chassis.strip().upper()
-    session = active_vehicle_sessions.get(c, {
-        "chassisNumber": c,
-        "calibration": DEFAULT_HARDWARE_CALIBRATION,
-    })
-    cal = session.get("calibration", DEFAULT_HARDWARE_CALIBRATION)
+    session = active_vehicle_sessions.get(c, {})
+    cal = session.get("calibration") or find_calibration_for_chassis(c)
 
-    v_nom = float(cal.get("voltage_nominal", 11.8))
-    v_sag = float(cal.get("voltage_sag_limit", 9.8))
-    i_crit = float(cal.get("current_overload_limit", 0.85))
-    t_crit = float(cal.get("temp_critical_limit", 38.0))
-    rpm_max = float(cal.get("rpm_max_rated", 260))
+    v_min = float(cal.get("voltage_min", cal.get("voltage_sag_limit", 9.8)))
+    v_max = float(cal.get("voltage_max", float(cal.get("voltage_nominal", 11.8)) * 1.15))
+    v_nom = float(cal.get("voltage_nominal", (v_min + v_max) / 2.0))
+    i_max = float(cal.get("current_max", cal.get("current_overload_limit", 0.85)))
+    t_max = float(cal.get("temp_max", cal.get("temp_critical_limit", 38.0)))
+    rpm_max = float(cal.get("rpm_max", cal.get("rpm_max_rated", 260)))
 
-    # Cancel previous timer if still running
     if c in simulation_tasks and not simulation_tasks[c].done():
         simulation_tasks[c].cancel()
 
     if fault_class == 0:
-        # Reset to Nominal
         sim_data = {
-            "Voltage": v_nom,
+            "Voltage": round(v_nom, 2),
             "Current": round(float(cal.get("current_nominal", 0.20)), 2),
-            "Temperature": 28.5,
+            "Temperature": round(float(cal.get("temp_nominal", 28.0)), 1),
             "motor_rpm": round(rpm_max * 0.85),
             "ambient_temp": 26.4,
             "ambient_humidity": 52.0,
@@ -246,10 +269,10 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 1:
-        # Motor Overload / Jam: Current spikes to 1.15A while RPM stalls to 25
+        # Breaches Admin current threshold
         sim_data = {
-            "Voltage": v_nom - 0.4,
-            "Current": round(i_crit * 1.35, 2),  # ~1.15 A
+            "Voltage": round(v_nom, 2),
+            "Current": round(i_max * 1.40, 2),
             "Temperature": 32.0,
             "motor_rpm": 25.0,
             "ambient_temp": 26.4,
@@ -260,9 +283,9 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 2:
-        # Inverter Voltage Sag: Pack voltage drops below 9.8V cutoff
+        # Breaches Admin voltage min cutoff
         sim_data = {
-            "Voltage": round(v_sag - 0.60, 2),  # ~9.20 V
+            "Voltage": round(max(0.0, v_min - 1.2), 2),
             "Current": 0.24,
             "Temperature": 29.5,
             "motor_rpm": round(rpm_max * 0.55),
@@ -274,11 +297,11 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 3:
-        # Thermal Runaway: Pack temperature reaches 41.5°C
+        # Breaches Admin thermal max cutoff
         sim_data = {
-            "Voltage": v_nom,
+            "Voltage": round(v_nom, 2),
             "Current": 0.22,
-            "Temperature": round(t_crit + 3.5, 1),  # ~41.5 °C
+            "Temperature": round(t_max + 4.5, 1),
             "motor_rpm": round(rpm_max * 0.8),
             "ambient_temp": 26.4,
             "ambient_humidity": 52.0,
@@ -288,16 +311,16 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 4:
-        # Excessive Mechanical Vibration: Lateral vibration spikes on MPU6050
+        # Breaches Admin dynamic vibration cutoff
         sim_data = {
-            "Voltage": v_nom,
+            "Voltage": round(v_nom, 2),
             "Current": 0.35,
             "Temperature": 30.0,
             "motor_rpm": round(rpm_max * 0.9),
             "ambient_temp": 26.4,
             "ambient_humidity": 52.0,
-            "vibration_x": 1.85,
-            "vibration_y": 1.70,
+            "vibration_x": 2.2,
+            "vibration_y": 2.0,
             "vibration_z": 9.81,
             "chassis": c,
         }
@@ -307,7 +330,6 @@ async def simulate_fault(chassis: str, fault_class: int):
     active_simulations[c] = sim_data
     agent_res = orchestrator.process_telemetry(sim_data, session)
 
-    # Schedule automatic 10-second expiration back to live telemetry
     simulation_tasks[c] = asyncio.create_task(revert_simulation_after_delay(c, 10.0))
 
     return {
@@ -323,7 +345,6 @@ async def simulate_fault(chassis: str, fault_class: int):
 
 @app.post("/api/simulate/{chassis}/reset")
 def reset_simulation(chassis: str):
-    """Immediately clears simulation and returns to live Firebase RTDB."""
     c = chassis.strip().upper()
     if c in simulation_tasks and not simulation_tasks[c].done():
         simulation_tasks[c].cancel()
@@ -335,16 +356,19 @@ def reset_simulation(chassis: str):
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
     c = chassis.strip().upper()
-    print(f"[WebSocket Connected] Testbench stream established: {c}")
+    print(f"[WebSocket Connected] Live stream established for chassis: {c}")
 
     try:
         while True:
-            session = active_vehicle_sessions.get(c, {
-                "chassisNumber": c,
-                "email": "engineer@voltpulse.io",
-                "fullName": "Hardware Engineer",
-                "calibration": DEFAULT_HARDWARE_CALIBRATION,
-            })
+            session = active_vehicle_sessions.get(c)
+            if not session:
+                cal = find_calibration_for_chassis(c)
+                session = {
+                    "chassisNumber": c,
+                    "email": "driver@voltpulse.io",
+                    "fullName": "Vehicle Owner",
+                    "calibration": cal,
+                }
 
             sim = active_simulations.get(c)
             if sim:
@@ -363,7 +387,7 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
                 "telemetry": raw_tel,
                 "agent_result": agent_res,
                 "is_simulating": sim_active,
-                "calibration": session.get("calibration", DEFAULT_HARDWARE_CALIBRATION),
+                "calibration": session.get("calibration", DEFAULT_MODEL_CALIBRATION),
             }
 
             await websocket.send_text(json.dumps(payload))

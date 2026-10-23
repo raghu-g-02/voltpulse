@@ -1,15 +1,17 @@
 // src/pages/UserDashboard.jsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Navbar from "../components/Navbar";
 import EditProfileModal from "../components/EditProfileModal";
 import { useAuth } from "../context/AuthContext";
 import { useTelemetry } from "../context/TelemetryContext";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db } from "../firebase";
 import { 
   Zap, Activity, Gauge, Thermometer, Wind, Droplets, 
   AlertOctagon, CheckCircle2, Volume2, VolumeX, 
   Edit3, ShieldCheck, Cpu, Waves, Play, RotateCcw,
   Clock, Download, Filter, ArrowUpDown, ArrowUpRight, ArrowDownRight, ArrowLeft,
-  Timer, Compass
+  Timer, Compass, Shield
 } from "lucide-react";
 
 export default function UserDashboard({ onBackToHome, onOpenAbout }) {
@@ -34,17 +36,33 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const [filterType, setFilterType] = useState("ALL");
   const [sortOrder, setSortOrder] = useState("DESC");
 
-  const cal = userProfile?.calibration || {
-    modelName: "3S Hardware Testbench (12V L298N)",
-    manufacturer: "VoltPulse Lab Rig",
-    voltage_nominal: 11.8,
-    voltage_sag_limit: 9.8,
-    current_nominal: 0.20,
-    current_overload_limit: 0.85,
-    temp_nominal: 28.0,
-    temp_critical_limit: 38.0,
-    rpm_max_rated: 260,
-  };
+  // Dynamic live sync with Admin-configured vehicle_models collection
+  const [liveModelCal, setLiveModelCal] = useState(null);
+
+  useEffect(() => {
+    const modelName = userProfile?.vehicleModel || "Nexon EV";
+    const docId = modelName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+    const unsub = onSnapshot(doc(db, "vehicle_models", docId), (docSnap) => {
+      if (docSnap.exists()) {
+        setLiveModelCal(docSnap.data());
+      }
+    }, (err) => console.warn("Live model listener fallback:", err));
+
+    return () => unsub();
+  }, [userProfile?.vehicleModel]);
+
+  // Read active thresholds set by Admin
+  const appliedThresh = agentResult?.applied_thresholds || {};
+  const activeCal = liveModelCal || userProfile?.calibration || {};
+
+  const vMin = appliedThresh.voltage_min ?? activeCal.voltage_min ?? activeCal.voltage_sag_limit ?? 9.8;
+  const vMax = appliedThresh.voltage_max ?? activeCal.voltage_max ?? 12.6;
+  const iMax = appliedThresh.current_max ?? activeCal.current_max ?? activeCal.current_overload_limit ?? 0.85;
+  const tMax = appliedThresh.temp_max ?? activeCal.temp_max ?? activeCal.temp_critical_limit ?? 38.0;
+  const rpmMax = appliedThresh.rpm_max ?? activeCal.rpm_max ?? activeCal.rpm_max_rated ?? 260;
+  const vibMax = appliedThresh.vibration_max ?? activeCal.vibration_max ?? 2.2;
+  const modelTitle = activeCal.modelName || userProfile?.vehicleModel || "Nexon EV";
 
   const v = parseFloat(telemetry?.Voltage ?? 0);
   const i = parseFloat(telemetry?.Current ?? 0);
@@ -59,7 +77,12 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const diagnosis = agentResult?.diagnosis;
   const isFaultActive = diagnosis?.fault_class !== 0 && diagnosis?.fault_class !== undefined;
   const faultLabel = diagnosis?.diagnosis_label || "Nominal Operation";
-  const driverSuggestion = diagnosis?.driver_suggestion || "All systems nominal. Safe and fine to drive.";
+  const driverSuggestion = diagnosis?.driver_suggestion || "Powertrain operating nominally within calibrated limits. Safe and fine to drive.";
+
+  // Parameter breach flags
+  const isVBreached = (v < vMin || v > vMax) && v > 0.2;
+  const isIBreached = i >= iMax;
+  const isTBreached = t >= tMax;
 
   // Filter & Sort Fault History
   let displayedFaults = [...faultHistory];
@@ -72,7 +95,6 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   }
   displayedFaults.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
 
-  // Sort Logs
   let displayedLogs = [...telemetryLogs];
   displayedLogs.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
 
@@ -109,15 +131,19 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-cyan-700 font-mono">
-                {cal.manufacturer} • {cal.modelName}
+                {modelTitle}
               </span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-100 text-slate-600">
                 VIN: {userProfile?.chassisNumber || "MAT612089N1A23456"}
               </span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                <Shield className="w-3 h-3" />
+                <span>OEM Calibrated</span>
+              </span>
             </div>
             <h1 className="text-2xl font-black text-slate-900 mt-1">Vehicle Telematics Cockpit</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              Live feed: <strong className="font-mono text-cyan-700">{source || "STANDBY"}</strong>
+              Live Stream: <strong className="font-mono text-cyan-700">{source || "STANDBY"}</strong>
             </p>
           </div>
 
@@ -149,7 +175,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
             >
               <Edit3 className="w-3.5 h-3.5" />
-              <span>Edit All Details</span>
+              <span>Edit Vehicle / Profile</span>
             </button>
           </div>
         </div>
@@ -168,7 +194,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
             )}
             <div>
               <div className="text-sm font-bold flex items-center gap-2">
-                <span>{!isFaultActive ? `Status: SAFE (${cal.modelName})` : `Safety Hazard: ${faultLabel}`}</span>
+                <span>{!isFaultActive ? `Status: SAFE (${modelTitle})` : `Safety Hazard: ${faultLabel}`}</span>
                 {!isFaultActive && (
                   <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
                     Safe to Drive
@@ -198,14 +224,14 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
                 <span>Hardware Testbench Simulation Controls (10-Second Auto-Reset)</span>
               </span>
               <span className="text-slate-400 text-[11px]">
-                Injects test fault states to demonstrate real-time AI classification and voice advisory. Resets to live RTDB after 10s.
+                Injects test fault states to verify OEM limits. Automatically reverts to live Firebase RTDB after 10s.
               </span>
             </div>
 
             {isSimulating && (
               <div className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 font-bold text-xs animate-pulse">
                 <Timer className="w-4 h-4 text-amber-600" />
-                <span>Demo Overriding RTDB: {simulationCountdown}s remaining</span>
+                <span>Demo Override: {simulationCountdown}s remaining</span>
               </div>
             )}
           </div>
@@ -216,7 +242,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
               <Play className="w-3.5 h-3.5 text-rose-600" />
-              <span>1. Motor Stall / Overload (1.15A)</span>
+              <span>Breach Current Limit (&gt; {iMax}A)</span>
             </button>
 
             <button
@@ -224,7 +250,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
               <Play className="w-3.5 h-3.5 text-amber-600" />
-              <span>2. Battery Sag (9.2V)</span>
+              <span>Breach Voltage Min (&lt; {vMin}V)</span>
             </button>
 
             <button
@@ -232,7 +258,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
               <Play className="w-3.5 h-3.5 text-rose-600" />
-              <span>3. Thermal Runaway (41.5°C)</span>
+              <span>Breach Temp Max (&gt; {tMax}°C)</span>
             </button>
 
             <button
@@ -240,7 +266,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-3 py-2 rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
               <Play className="w-3.5 h-3.5 text-purple-600" />
-              <span>4. High Vibration (MPU-6050)</span>
+              <span>Breach Vibration (&gt; {vibMax} m/s²)</span>
             </button>
 
             <button
@@ -248,49 +274,60 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold transition flex items-center gap-1.5 shadow-sm ml-auto"
             >
               <RotateCcw className="w-3.5 h-3.5 text-slate-600" />
-              <span>Revert to Live Firebase RTDB</span>
+              <span>Reset to Live Firebase RTDB</span>
             </button>
           </div>
         </div>
 
-        {/* 10-Channel Live Sensor Readings */}
+        {/* 10-Channel Live Sensor Readings vs. OEM Envelopes */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
           <div className="flex justify-between items-center pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-900">
-                Live Sensor Telemetry
+                Live Sensor Telemetry vs. OEM Thresholds
               </h2>
-              <p className="text-xs text-slate-400">Continuous 2s Stream</p>
+              <p className="text-xs text-slate-400">Values outside your model's safe range turn red automatically</p>
             </div>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>{isSimulating ? `Demo Override (${simulationCountdown}s)` : "ESP32 Live Stream Active"}</span>
+              <span>{isSimulating ? `Demo Override (${simulationCountdown}s)` : "Live RTDB Stream"}</span>
             </span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3.5">
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            {/* Voltage */}
+            <div className={`rounded-2xl p-4 border transition ${
+              isVBreached ? "bg-rose-50 border-rose-300" : "bg-slate-50 border-slate-200"
+            }`}>
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
-                <span>3S Battery Pack</span>
-                <Zap className="w-4 h-4 text-cyan-600" />
+                <span>Pack Voltage</span>
+                <Zap className={`w-4 h-4 ${isVBreached ? "text-rose-600" : "text-cyan-600"}`} />
               </div>
-              <div className="text-2xl font-black font-mono text-slate-900 mt-2">
+              <div className={`text-2xl font-black font-mono mt-2 ${isVBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {v.toFixed(2)} <span className="text-sm font-normal text-slate-500">V</span>
               </div>
-              <div className="text-[11px] text-slate-400 mt-1">Sag Limit: &le; {cal.voltage_sag_limit} V</div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Safe: <strong className="text-slate-800">{vMin}V – {vMax}V</strong>
+              </div>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            {/* Current */}
+            <div className={`rounded-2xl p-4 border transition ${
+              isIBreached ? "bg-rose-50 border-rose-300" : "bg-slate-50 border-slate-200"
+            }`}>
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>Motor Current</span>
-                <Activity className="w-4 h-4 text-blue-600" />
+                <Activity className={`w-4 h-4 ${isIBreached ? "text-rose-600" : "text-blue-600"}`} />
               </div>
-              <div className="text-2xl font-black font-mono text-slate-900 mt-2">
+              <div className={`text-2xl font-black font-mono mt-2 ${isIBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {i.toFixed(2)} <span className="text-sm font-normal text-slate-500">A</span>
               </div>
-              <div className="text-[11px] text-slate-400 mt-1">Overload: &ge; {cal.current_overload_limit} A</div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Cutoff: <strong className="text-slate-800">≥ {iMax} A</strong>
+              </div>
             </div>
 
+            {/* RPM */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>LM393 Tachometer</span>
@@ -299,20 +336,28 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-2xl font-black font-mono text-slate-900 mt-2">
                 {rpm} <span className="text-sm font-normal text-slate-500">RPM</span>
               </div>
-              <div className="text-[11px] text-slate-400 mt-1">Max Rated: {cal.rpm_max_rated} RPM</div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Rated Max: <strong className="text-slate-800">{rpmMax} RPM</strong>
+              </div>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+            {/* Core Temp */}
+            <div className={`rounded-2xl p-4 border transition ${
+              isTBreached ? "bg-rose-50 border-rose-300" : "bg-slate-50 border-slate-200"
+            }`}>
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DS18B20 Temp Probe</span>
-                <Thermometer className="w-4 h-4 text-amber-600" />
+                <Thermometer className={`w-4 h-4 ${isTBreached ? "text-rose-600" : "text-amber-600"}`} />
               </div>
-              <div className="text-2xl font-black font-mono text-slate-900 mt-2">
+              <div className={`text-2xl font-black font-mono mt-2 ${isTBreached ? "text-rose-700" : "text-slate-900"}`}>
                 {t.toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
               </div>
-              <div className="text-[11px] text-slate-400 mt-1">Thermal Cutoff: &ge; {cal.temp_critical_limit} °C</div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Thermal Cutoff: <strong className="text-slate-800">≥ {tMax} °C</strong>
+              </div>
             </div>
 
+            {/* Ambient Temp */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DHT22 Room Temp</span>
@@ -324,6 +369,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Ambient Weather</div>
             </div>
 
+            {/* Ambient Humidity */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DHT22 Humidity</span>
@@ -335,17 +381,21 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Relative Moisture</div>
             </div>
 
+            {/* Dynamic Vibration */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
-                <span>MPU-6050 Lateral Vib</span>
+                <span>Dynamic Vibration</span>
                 <Waves className="w-4 h-4 text-purple-600" />
               </div>
               <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-                {(Math.sqrt(vib_x**2 + vib_y**2)).toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
+                {(Math.max(0.0, Math.abs(Math.sqrt(vib_x**2 + vib_y**2 + vib_z**2) - 9.81))).toFixed(2)} <span className="text-sm font-normal text-slate-500">m/s²</span>
               </div>
-              <div className="text-[11px] text-slate-400 mt-1">X: {vib_x.toFixed(2)} | Y: {vib_y.toFixed(2)}</div>
+              <div className="text-[11px] font-semibold text-slate-500 mt-1">
+                Limit: <strong className="text-slate-800">≤ {vibMax} m/s²</strong>
+              </div>
             </div>
 
+            {/* Z Gravity */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>MPU-6050 Z-Axis</span>
@@ -520,55 +570,37 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           )}
         </div>
 
-        {/* Profile Card View */}
+        {/* OEM Linked Envelope Card (Read-Only to Drivers) */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
           <div className="flex justify-between items-center pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
                 <ShieldCheck className="w-4 h-4 text-cyan-600" />
-                <span>Vehicle Specification & Calibration Link</span>
+                <span>OEM Powertrain Specifications & Safe Envelope</span>
               </h2>
-              <p className="text-xs text-slate-400">Registered parameters and manufacturer envelope binding</p>
+              <p className="text-xs text-slate-400">Calibrated by manufacturer engineer — applied to all {modelTitle} vehicles</p>
             </div>
-
-            <button
-              onClick={() => setIsEditModalOpen(true)}
-              className="px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 flex items-center gap-1 transition"
-            >
-              <Edit3 className="w-3.5 h-3.5 text-slate-500" />
-              <span>Edit Details</span>
-            </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Owner Full Name</span>
-              <span className="font-bold text-slate-900 text-sm mt-0.5 block">{userProfile?.fullName || "Raghu"}</span>
+              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Safe Voltage Range</span>
+              <span className="font-mono font-bold text-slate-900 text-sm mt-0.5 block">{vMin} V – {vMax} V</span>
             </div>
 
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Vehicle Company</span>
-              <span className="font-bold text-slate-900 text-sm mt-0.5 block">{cal.manufacturer}</span>
+              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Overload Cutoff</span>
+              <span className="font-mono font-bold text-rose-700 text-sm mt-0.5 block">≥ {iMax} A</span>
             </div>
 
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Model Variant</span>
-              <span className="font-bold text-cyan-700 text-sm mt-0.5 block">{cal.modelName}</span>
+              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Thermal Cutoff</span>
+              <span className="font-mono font-bold text-amber-700 text-sm mt-0.5 block">≥ {tMax} °C</span>
             </div>
 
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Chassis Number (VIN)</span>
-              <span className="font-mono font-bold text-slate-900 text-sm mt-0.5 block">{userProfile?.chassisNumber || "MAT612089N1A23456"}</span>
-            </div>
-
-            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Vehicle Plate / ID</span>
-              <span className="font-mono font-bold text-slate-900 text-sm mt-0.5 block">{userProfile?.vehicleId || "VEH-A23456"}</span>
-            </div>
-
-            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Contact Phone</span>
-              <span className="font-bold text-slate-900 text-sm mt-0.5 block">{userProfile?.phone || "+91 9187654320"}</span>
+              <span className="text-[10px] text-slate-400 uppercase font-semibold block">Vibration Limit</span>
+              <span className="font-mono font-bold text-purple-700 text-sm mt-0.5 block">≤ {vibMax} m/s²</span>
             </div>
           </div>
         </div>

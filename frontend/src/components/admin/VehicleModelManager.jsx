@@ -1,6 +1,6 @@
 // src/components/admin/VehicleModelManager.jsx
 import React, { useState } from "react";
-import { Sliders, Plus, Trash2, Edit3, Check, X, ShieldCheck, Cpu, ArrowLeft } from "lucide-react";
+import { Sliders, Plus, Trash2, Edit3, Check, X, ShieldCheck, Cpu, ArrowLeft, ShieldAlert } from "lucide-react";
 import { doc, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "../../firebase";
 
@@ -10,17 +10,19 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
 
-  // Default calibrated form matching your 3S 18650 battery + TT Motor rig
   const initialForm = {
-    modelName: "3S Hardware Testbench (12V L298N)",
-    manufacturer: manufacturerName || "VoltPulse Lab Rig",
+    modelName: "Nexon EV",
+    manufacturer: manufacturerName || "Tata Motors",
+    voltage_min: 9.8,
     voltage_nominal: 11.8,
-    voltage_sag_limit: 9.8,
+    voltage_max: 12.6,
     current_nominal: 0.20,
-    current_overload_limit: 0.85,
+    current_max: 0.85,
     temp_nominal: 28.0,
-    temp_critical_limit: 38.0,
-    rpm_max_rated: 260,
+    temp_max: 38.0,
+    rpm_min: 30,
+    rpm_max: 260,
+    vibration_max: 2.2,
     chassisInput: "MAT612089N1A23456",
   };
 
@@ -31,14 +33,17 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     setEditingId(model.id);
     setFormData({
       modelName: model.modelName || "",
-      manufacturer: model.manufacturer || manufacturerName || "VoltPulse Lab Rig",
+      manufacturer: model.manufacturer || manufacturerName || "Tata Motors",
+      voltage_min: model.voltage_min ?? model.voltage_sag_limit ?? 9.8,
       voltage_nominal: model.voltage_nominal ?? 11.8,
-      voltage_sag_limit: model.voltage_sag_limit ?? 9.8,
+      voltage_max: model.voltage_max ?? 12.6,
       current_nominal: model.current_nominal ?? 0.20,
-      current_overload_limit: model.current_overload_limit ?? 0.85,
+      current_max: model.current_max ?? model.current_overload_limit ?? 0.85,
       temp_nominal: model.temp_nominal ?? 28.0,
-      temp_critical_limit: model.temp_critical_limit ?? 38.0,
-      rpm_max_rated: model.rpm_max_rated ?? 260,
+      temp_max: model.temp_max ?? model.temp_critical_limit ?? 38.0,
+      rpm_min: model.rpm_min ?? 30,
+      rpm_max: model.rpm_max ?? model.rpm_max_rated ?? 260,
+      vibration_max: model.vibration_max ?? model.vibration_limit ?? 2.2,
       chassisInput: Array.isArray(model.assignedChassis) ? model.assignedChassis.join(", ") : "",
     });
     setIsAdding(true);
@@ -68,21 +73,31 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
     const payload = {
       id: docId,
       modelName: formData.modelName.trim(),
-      manufacturer: formData.manufacturer.trim() || manufacturerName || "VoltPulse Lab Rig",
+      manufacturer: formData.manufacturer.trim() || manufacturerName || "Tata Motors",
+      voltage_min: parseFloat(formData.voltage_min) || 0.0,
       voltage_nominal: parseFloat(formData.voltage_nominal) || 11.8,
-      voltage_sag_limit: parseFloat(formData.voltage_sag_limit) || 9.8,
+      voltage_max: parseFloat(formData.voltage_max) || 15.0,
+      voltage_sag_limit: parseFloat(formData.voltage_min) || 0.0,
       current_nominal: parseFloat(formData.current_nominal) || 0.20,
-      current_overload_limit: parseFloat(formData.current_overload_limit) || 0.85,
+      current_max: parseFloat(formData.current_max) || 0.85,
+      current_overload_limit: parseFloat(formData.current_max) || 0.85,
       temp_nominal: parseFloat(formData.temp_nominal) || 28.0,
-      temp_critical_limit: parseFloat(formData.temp_critical_limit) || 38.0,
-      rpm_max_rated: parseFloat(formData.rpm_max_rated) || 260,
+      temp_max: parseFloat(formData.temp_max) || 38.0,
+      temp_critical_limit: parseFloat(formData.temp_max) || 38.0,
+      rpm_min: parseFloat(formData.rpm_min) || 0,
+      rpm_max: parseFloat(formData.rpm_max) || 260,
+      rpm_max_rated: parseFloat(formData.rpm_max) || 260,
+      vibration_max: parseFloat(formData.vibration_max) || 2.2,
+      vibration_limit: parseFloat(formData.vibration_max) || 2.2,
       assignedChassis: chassisArray,
       updatedAt: Date.now(),
     };
 
     try {
+      // 1. Save to Firestore vehicle_models catalog
       await setDoc(doc(db, "vehicle_models", docId), payload, { merge: true });
 
+      // 2. Sync directly with the active backend engine
       await fetch(`${API_BASE}/api/models/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -100,7 +115,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
   };
 
   const handleDeleteModel = async (modelId, name) => {
-    const confirmDel = window.confirm(`Are you sure you want to delete model "${name}"?`);
+    const confirmDel = window.confirm(`Delete model "${name}"?`);
     if (!confirmDel) return;
 
     try {
@@ -128,10 +143,10 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
           <div>
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-2">
               <Sliders className="w-4 h-4 text-cyan-600" />
-              Vehicle Models & Calibration Catalog
+              OEM Model Threshold Envelope Catalog
             </h2>
             <p className="text-xs text-slate-500">
-              Tune threshold envelopes for 3S 18650 testbenches and production EV models.
+              Thresholds set here apply to all customer vehicles linked to this model variant.
             </p>
           </div>
 
@@ -154,7 +169,7 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
           <form onSubmit={handleSaveModel} className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4">
             <div className="flex justify-between items-center pb-2 border-b border-slate-200">
               <span className="text-xs font-bold text-slate-800">
-                {editingId ? `Edit Model: ${formData.modelName}` : "Register New Vehicle Model"}
+                {editingId ? `Edit Model Calibration: ${formData.modelName}` : "Register New Vehicle Model"}
               </span>
               <button type="button" onClick={handleCancel} className="text-slate-400 hover:text-slate-600">
                 <X className="w-4 h-4" />
@@ -163,14 +178,13 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
               <div>
-                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Company / Manufacturer</label>
+                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Company / OEM</label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. VoltPulse Lab Rig"
                   value={formData.manufacturer}
                   onChange={(e) => setFormData({ ...formData, manufacturer: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-bold focus:outline-none focus:border-cyan-500"
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-bold"
                 />
               </div>
 
@@ -179,92 +193,93 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
                 <input
                   type="text"
                   required
-                  placeholder="e.g. 3S Hardware Testbench (12V L298N)"
                   value={formData.modelName}
                   onChange={(e) => setFormData({ ...formData, modelName: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-cyan-500 font-bold"
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-bold"
                 />
               </div>
 
               <div>
-                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Nominal Voltage (V)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  required
-                  value={formData.voltage_nominal}
-                  onChange={(e) => setFormData({ ...formData, voltage_nominal: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-slate-900 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-rose-500 uppercase block mb-1">Voltage Sag Limit (V)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  required
-                  value={formData.voltage_sag_limit}
-                  onChange={(e) => setFormData({ ...formData, voltage_sag_limit: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-rose-700 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-rose-500 uppercase block mb-1">Current Overload Cutoff (A)</label>
+                <label className="text-[10px] font-semibold text-rose-600 uppercase block mb-1">Voltage Min (Sag Cutoff)</label>
                 <input
                   type="number"
                   step="0.05"
                   required
-                  value={formData.current_overload_limit}
-                  onChange={(e) => setFormData({ ...formData, current_overload_limit: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-rose-700 focus:outline-none focus:border-cyan-500"
+                  value={formData.voltage_min}
+                  onChange={(e) => setFormData({ ...formData, voltage_min: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-rose-200 rounded-lg font-mono font-bold text-rose-700"
                 />
               </div>
 
               <div>
-                <label className="text-[10px] font-semibold text-amber-500 uppercase block mb-1">Critical Max Temp (°C)</label>
+                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Voltage Nominal</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  required
+                  value={formData.voltage_nominal}
+                  onChange={(e) => setFormData({ ...formData, voltage_nominal: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-semibold text-rose-600 uppercase block mb-1">Voltage Max (Surge)</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  required
+                  value={formData.voltage_max}
+                  onChange={(e) => setFormData({ ...formData, voltage_max: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-rose-200 rounded-lg font-mono font-bold text-rose-700"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-semibold text-rose-600 uppercase block mb-1">Current Overload Cutoff (A)</label>
+                <input
+                  type="number"
+                  step="0.05"
+                  required
+                  value={formData.current_max}
+                  onChange={(e) => setFormData({ ...formData, current_max: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-rose-200 rounded-lg font-mono font-bold text-rose-700"
+                />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-semibold text-amber-600 uppercase block mb-1">Thermal Max Cutoff (°C)</label>
                 <input
                   type="number"
                   step="0.5"
                   required
-                  value={formData.temp_critical_limit}
-                  onChange={(e) => setFormData({ ...formData, temp_critical_limit: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-amber-700 focus:outline-none focus:border-cyan-500"
+                  value={formData.temp_max}
+                  onChange={(e) => setFormData({ ...formData, temp_max: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-amber-200 rounded-lg font-mono font-bold text-amber-700"
                 />
               </div>
 
               <div>
-                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Max Rated RPM</label>
+                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Rated Max RPM</label>
                 <input
                   type="number"
                   step="10"
                   required
-                  value={formData.rpm_max_rated}
-                  onChange={(e) => setFormData({ ...formData, rpm_max_rated: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-slate-900 focus:outline-none focus:border-cyan-500"
+                  value={formData.rpm_max}
+                  onChange={(e) => setFormData({ ...formData, rpm_max: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono font-bold text-slate-900"
                 />
               </div>
 
               <div>
-                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Nominal Idle Current (A)</label>
+                <label className="text-[10px] font-semibold text-purple-600 uppercase block mb-1">Max Vibration (m/s²)</label>
                 <input
                   type="number"
-                  step="0.05"
-                  value={formData.current_nominal}
-                  onChange={(e) => setFormData({ ...formData, current_nominal: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono text-slate-700 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="text-[10px] font-semibold text-slate-500 uppercase block mb-1">Nominal Temp (°C)</label>
-                <input
-                  type="number"
-                  step="0.5"
-                  value={formData.temp_nominal}
-                  onChange={(e) => setFormData({ ...formData, temp_nominal: e.target.value })}
-                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg font-mono text-slate-700 focus:outline-none focus:border-cyan-500"
+                  step="0.1"
+                  required
+                  value={formData.vibration_max}
+                  onChange={(e) => setFormData({ ...formData, vibration_max: e.target.value })}
+                  className="w-full px-3 py-1.5 bg-white border border-purple-200 rounded-lg font-mono font-bold text-purple-700"
                 />
               </div>
             </div>
@@ -272,14 +287,14 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
             <div className="pt-2">
               <label className="text-[10px] font-semibold text-cyan-800 uppercase block mb-1 flex items-center gap-1.5">
                 <Cpu className="w-3.5 h-3.5 text-cyan-600" />
-                <span>Assigned Chassis Numbers (VINs) for this Model</span>
+                <span>Authorized Chassis Numbers (VINs) for this Model (Comma or newline separated)</span>
               </label>
               <textarea
                 rows={2}
-                placeholder="e.g. MAT612089N1A23456"
+                placeholder="e.g. MAT612089N1A23456, MAT612089N1A78901"
                 value={formData.chassisInput}
                 onChange={(e) => setFormData({ ...formData, chassisInput: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs text-slate-900 focus:outline-none focus:border-cyan-500"
+                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs text-slate-900"
               />
             </div>
 
@@ -304,69 +319,68 @@ export default function VehicleModelManager({ vehicleModels, manufacturerName, o
           </form>
         )}
 
-        {vehicleModels.length === 0 ? (
-          <div className="py-8 text-center text-xs text-slate-400">
-            No vehicle models defined. Click "Add Vehicle Model" above.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="text-[10px] uppercase font-mono text-slate-400 bg-slate-50 border-b border-slate-100">
-                <tr>
-                  <th className="py-2.5 px-3">Company</th>
-                  <th className="py-2.5 px-3">Model Variant</th>
-                  <th className="py-2.5 px-3">Nominal Voltage</th>
-                  <th className="py-2.5 px-3">Sag Limit</th>
-                  <th className="py-2.5 px-3">Overload Limit</th>
-                  <th className="py-2.5 px-3">Max Temp</th>
-                  <th className="py-2.5 px-3">Linked Chassis</th>
-                  <th className="py-2.5 px-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-mono">
-                {vehicleModels.map((m) => {
-                  const chassisCount = Array.isArray(m.assignedChassis) ? m.assignedChassis.length : 0;
-                  return (
-                    <tr key={m.id} className="hover:bg-slate-50 transition">
-                      <td className="py-2.5 px-3 font-sans font-bold text-slate-800">{m.manufacturer}</td>
-                      <td className="py-2.5 px-3 font-sans font-bold text-slate-900 flex items-center gap-1.5">
-                        <ShieldCheck className="w-3.5 h-3.5 text-cyan-600" />
-                        <span>{m.modelName}</span>
-                      </td>
-                      <td className="py-2.5 px-3 text-cyan-700 font-bold">{m.voltage_nominal} V</td>
-                      <td className="py-2.5 px-3 text-rose-600 font-bold">&le; {m.voltage_sag_limit} V</td>
-                      <td className="py-2.5 px-3 text-rose-600 font-bold">&ge; {m.current_overload_limit} A</td>
-                      <td className="py-2.5 px-3 text-amber-600 font-bold">&ge; {m.temp_critical_limit} °C</td>
-                      <td className="py-2.5 px-3 font-sans">
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-50 text-cyan-800 border border-cyan-200">
-                          {chassisCount} VIN{chassisCount === 1 ? "" : "s"}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        <div className="flex items-center justify-end gap-1 font-sans">
-                          <button
-                            onClick={() => handleEditClick(m)}
-                            className="p-1 rounded text-slate-400 hover:text-cyan-600 hover:bg-cyan-50"
-                            title="Edit Model"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteModel(m.id, m.modelName)}
-                            className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                            title="Delete Model"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-[10px] uppercase font-mono text-slate-400 bg-slate-50 border-b border-slate-100">
+              <tr>
+                <th className="py-2.5 px-3">OEM / Model</th>
+                <th className="py-2.5 px-3">Safe Voltage Range</th>
+                <th className="py-2.5 px-3">Overload Cutoff</th>
+                <th className="py-2.5 px-3">Thermal Max</th>
+                <th className="py-2.5 px-3">Max RPM</th>
+                <th className="py-2.5 px-3">Vibration</th>
+                <th className="py-2.5 px-3">Linked Chassis</th>
+                <th className="py-2.5 px-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-mono">
+              {vehicleModels.map((m) => {
+                const chassisCount = Array.isArray(m.assignedChassis) ? m.assignedChassis.length : 0;
+                const vMin = m.voltage_min ?? m.voltage_sag_limit ?? 9.8;
+                const vMax = m.voltage_max ?? 12.6;
+                const iMax = m.current_max ?? m.current_overload_limit ?? 0.85;
+                const tMax = m.temp_max ?? m.temp_critical_limit ?? 38.0;
+
+                return (
+                  <tr key={m.id} className="hover:bg-slate-50 transition">
+                    <td className="py-2.5 px-3 font-sans font-bold text-slate-900">
+                      <div>{m.modelName}</div>
+                      <div className="text-[10px] font-normal text-slate-400">{m.manufacturer}</div>
+                    </td>
+                    <td className="py-2.5 px-3 text-cyan-700 font-bold">{vMin}V – {vMax}V</td>
+                    <td className="py-2.5 px-3 text-rose-600 font-bold">≥ {iMax} A</td>
+                    <td className="py-2.5 px-3 text-amber-600 font-bold">≥ {tMax} °C</td>
+                    <td className="py-2.5 px-3 text-slate-700 font-bold">{m.rpm_max ?? m.rpm_max_rated ?? 260} RPM</td>
+                    <td className="py-2.5 px-3 text-purple-700 font-bold">≤ {m.vibration_max ?? m.vibration_limit ?? 2.2} m/s²</td>
+                    <td className="py-2.5 px-3 font-sans">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-50 text-cyan-800 border border-cyan-200">
+                        {chassisCount} VIN{chassisCount === 1 ? "" : "s"}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
+                      <div className="flex items-center justify-end gap-1 font-sans">
+                        <button
+                          onClick={() => handleEditClick(m)}
+                          className="p-1 rounded text-slate-400 hover:text-cyan-600 hover:bg-cyan-50"
+                          title="Edit Calibration"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteModel(m.id, m.modelName)}
+                          className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                          title="Delete Model"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
