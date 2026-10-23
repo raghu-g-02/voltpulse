@@ -12,6 +12,9 @@ import { auth, db } from "../firebase";
 
 const AuthContext = createContext();
 
+const rawApiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_BASE = rawApiBase.replace(/\/$/, "");
+
 export function AuthProvider({ children }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
@@ -23,7 +26,6 @@ export function AuthProvider({ children }) {
   };
 
   const signup = async (email, password, role = "user", extraData = {}) => {
-    // 1. STRICT 1-TO-1 CHASSIS CHECK (For Vehicle Owners)
     if (role === "user") {
       const chassisToCheck = (extraData.chassisNumber || "").trim().toUpperCase();
       if (!chassisToCheck) {
@@ -36,12 +38,11 @@ export function AuthProvider({ children }) {
 
       if (!existingSnap.empty) {
         throw new Error(
-          `Chassis Number ${chassisToCheck} is already registered to another owner. Each vehicle can only be linked to one account.`
+          `Chassis Number ${chassisToCheck} is already registered to another owner. Each vehicle must have a unique account.`
         );
       }
     }
 
-    // 2. Create Firebase Auth Credentials
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
 
@@ -52,7 +53,7 @@ export function AuthProvider({ children }) {
         uid: user.uid,
         userId: generateUniqueId("MFG"),
         email: user.email,
-        organizationName: extraData.organizationName || extraData.fullName || "EV Powertrain Manufacturer",
+        companyName: extraData.companyName || extraData.organizationName || "VoltPulse Lab Rig",
         fullName: extraData.fullName || extraData.organizationName || "Fleet Administrator",
         divisionCode: extraData.divisionCode || "PLANT-BLR-01",
         phone: extraData.phone || "",
@@ -60,8 +61,8 @@ export function AuthProvider({ children }) {
         createdAt: new Date().toISOString()
       };
     } else {
-      const chassisClean = extraData.chassisNumber.trim().toUpperCase();
-      const assignedVehicleId = `VEH-${chassisClean.slice(-6) || "EV01"}`;
+      const chassisClean = (extraData.chassisNumber || "MAT612089N1A23456").trim().toUpperCase();
+      const assignedVehicleId = extraData.vehicleId || `VEH-${chassisClean.slice(-6) || "EV01"}`;
 
       profile = {
         uid: user.uid,
@@ -70,15 +71,15 @@ export function AuthProvider({ children }) {
         fullName: extraData.fullName || "Vehicle Owner",
         phone: extraData.phone || "",
         role: "user",
+        companyName: extraData.companyName || "VoltPulse Lab Rig",
         vehicleId: assignedVehicleId,
-        vehicleModel: extraData.vehicleModel || "Tata Nexon EV",
+        vehicleModel: extraData.vehicleModel || "3S Hardware Testbench (12V L298N)",
         chassisNumber: chassisClean,
         createdAt: new Date().toISOString()
       };
     }
 
     await setDoc(doc(db, "users", user.uid), profile);
-
     setUserProfile(profile);
     setUserRole(role);
     return user;
@@ -87,7 +88,6 @@ export function AuthProvider({ children }) {
   const updateUserProfileData = async (updatedFields, newPassword = null) => {
     if (!currentUser) return;
 
-    // Check unique chassis constraint if user changes chassis number
     if (updatedFields.chassisNumber && userRole === "user") {
       const newChassis = updatedFields.chassisNumber.trim().toUpperCase();
       const usersRef = collection(db, "users");
@@ -97,7 +97,7 @@ export function AuthProvider({ children }) {
       const isTakenByAnother = snap.docs.some((d) => d.id !== currentUser.uid);
       if (isTakenByAnother) {
         throw new Error(
-          `Chassis ${newChassis} is already linked to another registered account. Cannot transfer ownership.`
+          `Chassis ${newChassis} is already registered to another account.`
         );
       }
       updatedFields.chassisNumber = newChassis;
@@ -113,21 +113,20 @@ export function AuthProvider({ children }) {
 
     const userDocRef = doc(db, "users", currentUser.uid);
     await updateDoc(userDocRef, updatedFields);
-
     setUserProfile((prev) => ({ ...prev, ...updatedFields }));
 
     if (userRole === "user") {
       try {
-        await fetch("http://localhost:8000/api/session/bind", {
+        await fetch(`${API_BASE}/api/session/bind`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             userId: userProfile?.userId || "OWN-DEFAULT",
             vehicleId: updatedFields.vehicleId || userProfile?.vehicleId || "VEH-DEFAULT",
-            vehicleModel: updatedFields.vehicleModel || userProfile?.vehicleModel || "Tata Nexon EV",
+            vehicleModel: updatedFields.vehicleModel || userProfile?.vehicleModel || "3S Hardware Testbench (12V L298N)",
             email: updatedFields.email || currentUser.email,
             fullName: updatedFields.fullName || userProfile?.fullName || "Vehicle Owner",
-            chassisNumber: updatedFields.chassisNumber || userProfile?.chassisNumber || ""
+            chassisNumber: updatedFields.chassisNumber || userProfile?.chassisNumber || "MAT612089N1A23456"
           })
         });
       } catch (e) {
@@ -145,7 +144,13 @@ export function AuthProvider({ children }) {
       window.speechSynthesis.cancel();
     }
     try {
-      await fetch("http://localhost:8000/api/session/unbind", { method: "POST" });
+      await fetch(`${API_BASE}/api/session/unbind`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chassisNumber: userProfile?.chassisNumber || ""
+        })
+      });
     } catch (e) {
       console.error("Backend unbind error:", e);
     }

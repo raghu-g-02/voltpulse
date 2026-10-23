@@ -1,4 +1,3 @@
-// src/pages/UserDashboard.jsx
 import React, { useState } from "react";
 import Navbar from "../components/Navbar";
 import EditProfileModal from "../components/EditProfileModal";
@@ -7,10 +6,11 @@ import { useTelemetry } from "../context/TelemetryContext";
 import { 
   Zap, Activity, Gauge, Thermometer, Wind, Droplets, 
   AlertOctagon, CheckCircle2, Volume2, VolumeX, 
-  Edit3, ShieldCheck, Cpu, Waves, Play, RotateCcw
+  Edit3, ShieldCheck, Cpu, Waves, Play, RotateCcw,
+  Clock, Download, Filter, ArrowUpDown, ArrowUpRight, ArrowDownRight, ArrowLeft
 } from "lucide-react";
 
-export default function UserDashboard({ onOpenAbout }) {
+export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const { userProfile } = useAuth();
   const { 
     telemetry, 
@@ -19,11 +19,15 @@ export default function UserDashboard({ onOpenAbout }) {
     isVoiceMuted, 
     toggleVoiceMute,
     triggerSimulation,
-    isSimulating
+    faultHistory,
+    telemetryLogs
   } = useTelemetry();
 
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("cockpit");
+  const [auditTab, setAuditTab] = useState("fault_history");
+  const [filterType, setFilterType] = useState("ALL");
+  const [sortOrder, setSortOrder] = useState("DESC");
 
   const cal = userProfile?.calibration || {
     modelName: "3S Hardware Testbench (12V L298N)",
@@ -51,6 +55,37 @@ export default function UserDashboard({ onOpenAbout }) {
   const isFaultActive = diagnosis?.fault_class !== 0 && diagnosis?.fault_class !== undefined;
   const faultLabel = diagnosis?.diagnosis_label || "Nominal Operation";
 
+  // Filter & Sort Fault History
+  let displayedFaults = [...faultHistory];
+  if (filterType === "INCREASES_ONLY") {
+    displayedFaults = displayedFaults.filter((f) => f.eventType === "FAULT_INCEPTION" || f.eventType === "FAULT_ESCALATED");
+  } else if (filterType === "DECREASES_ONLY") {
+    displayedFaults = displayedFaults.filter((f) => f.eventType === "FAULT_DEESCALATED");
+  } else if (filterType === "RECOVERIES_ONLY") {
+    displayedFaults = displayedFaults.filter((f) => f.eventType === "RECOVERY_NORMAL");
+  }
+  displayedFaults.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
+
+  // Sort Logs
+  let displayedLogs = [...telemetryLogs];
+  displayedLogs.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
+
+  const exportCSV = () => {
+    const chassis = userProfile?.chassisNumber || "MAT612089N1A23456";
+    const headers = "Timestamp,Date,Time,Chassis,EventType,Label,Voltage_V,Current_A,Temp_C,RPM\n";
+    const rows = displayedFaults.map((f) =>
+      `${f.timestampRaw},${f.date},${f.time},${f.chassis || chassis},${f.eventType},"${(f.label || "").replace(/"/g, '""')}",${f.voltage},${f.current},${f.temp},${f.rpm}`
+    ).join("\n");
+
+    const blob = new Blob([headers + rows], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit_${chassis}_${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 p-4 md:p-8 font-sans">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -58,6 +93,7 @@ export default function UserDashboard({ onOpenAbout }) {
           currentView={activeTab} 
           onNavigate={(view) => {
             if (view === "about") onOpenAbout();
+            else if (view === "home" && onBackToHome) onBackToHome();
             else setActiveTab(view);
           }} 
         />
@@ -80,6 +116,16 @@ export default function UserDashboard({ onOpenAbout }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onBackToHome && (
+              <button
+                onClick={onBackToHome}
+                className="px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition shadow-sm"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Portal Home</span>
+              </button>
+            )}
+
             <button
               onClick={toggleVoiceMute}
               className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition border ${
@@ -102,7 +148,7 @@ export default function UserDashboard({ onOpenAbout }) {
           </div>
         </div>
 
-        {/* Real-time Status Alert Banner */}
+        {/* Status Alert Banner */}
         <div className={`p-4 rounded-2xl border flex items-center justify-between transition-all ${
           !isFaultActive
             ? "border-emerald-200 bg-emerald-50 text-emerald-900 shadow-sm"
@@ -130,7 +176,7 @@ export default function UserDashboard({ onOpenAbout }) {
           </span>
         </div>
 
-        {/* Interactive Live Demo Simulation Panel */}
+        {/* Live Simulation Panel */}
         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
           <div>
             <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px] block">
@@ -187,12 +233,11 @@ export default function UserDashboard({ onOpenAbout }) {
             </div>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>{source.includes("FIREBASE") ? "ESP32 Live Stream" : "Simulation Injected"}</span>
+              <span>{source.includes("FIREBASE") ? "ESP32 Live Stream" : "Stream Active"}</span>
             </span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3.5">
-            {/* Battery Voltage */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>3S Battery Pack</span>
@@ -204,7 +249,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Sag Limit: &le; {cal.voltage_sag_limit} V</div>
             </div>
 
-            {/* Current Draw */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>Motor Current</span>
@@ -216,7 +260,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Overload: &ge; {cal.current_overload_limit} A</div>
             </div>
 
-            {/* Motor RPM */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>LM393 Tachometer</span>
@@ -228,7 +271,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Max Rated: {cal.rpm_max_rated} RPM</div>
             </div>
 
-            {/* Core Battery Temp */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DS18B20 Temp Probe</span>
@@ -240,7 +282,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Thermal Cutoff: &ge; {cal.temp_critical_limit} °C</div>
             </div>
 
-            {/* Ambient Temp */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DHT22 Room Temp</span>
@@ -252,7 +293,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Ambient Weather</div>
             </div>
 
-            {/* Ambient Humidity */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>DHT22 Humidity</span>
@@ -264,7 +304,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">Relative Moisture</div>
             </div>
 
-            {/* MPU6050 Lateral Vibration */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>MPU-6050 Lateral Vib</span>
@@ -276,7 +315,6 @@ export default function UserDashboard({ onOpenAbout }) {
               <div className="text-[11px] text-slate-400 mt-1">X: {vib_x.toFixed(2)} | Y: {vib_y.toFixed(2)}</div>
             </div>
 
-            {/* MPU6050 Z-Axis Gravity */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
               <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
                 <span>MPU-6050 Z-Axis</span>
@@ -290,15 +328,176 @@ export default function UserDashboard({ onOpenAbout }) {
           </div>
         </div>
 
+        {/* Comprehensive Vehicle History & 60s Logs Section */}
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-4 border-b border-slate-100 gap-3">
+            <div className="flex rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs">
+              <button
+                onClick={() => setAuditTab("fault_history")}
+                className={`px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 ${
+                  auditTab === "fault_history" ? "bg-white text-cyan-700 shadow-sm" : "text-slate-500 hover:text-slate-900"
+                }`}
+              >
+                <AlertOctagon className="w-3.5 h-3.5 text-rose-600" />
+                <span>Fault Transitions ({faultHistory.length})</span>
+              </button>
+              <button
+                onClick={() => setAuditTab("telemetry_logs")}
+                className={`px-3 py-1.5 rounded-lg font-bold transition flex items-center gap-1.5 ${
+                  auditTab === "telemetry_logs" ? "bg-white text-cyan-700 shadow-sm" : "text-slate-500 hover:text-slate-900"
+                }`}
+              >
+                <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                <span>60s Telemetry Logs ({telemetryLogs.length})</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {auditTab === "fault_history" && (
+                <div className="flex items-center gap-1 text-xs">
+                  <Filter className="w-3.5 h-3.5 text-slate-400" />
+                  <select
+                    value={filterType}
+                    onChange={(e) => setFilterType(e.target.value)}
+                    className="py-1 px-2 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700"
+                  >
+                    <option value="ALL">All Events</option>
+                    <option value="INCREASES_ONLY">Fault Triggers</option>
+                    <option value="DECREASES_ONLY">Fault Cleared</option>
+                    <option value="RECOVERIES_ONLY">Safe Recoveries</option>
+                  </select>
+                </div>
+              )}
+
+              <button
+                onClick={() => setSortOrder(sortOrder === "DESC" ? "ASC" : "DESC")}
+                className="px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs text-slate-700 flex items-center gap-1 font-semibold"
+              >
+                <ArrowUpDown className="w-3 h-3" />
+                <span>{sortOrder === "DESC" ? "Newest First" : "Oldest First"}</span>
+              </button>
+
+              <button
+                onClick={exportCSV}
+                className="px-2.5 py-1 rounded-lg border border-cyan-200 bg-cyan-50 hover:bg-cyan-100 text-xs text-cyan-700 font-bold flex items-center gap-1 transition"
+              >
+                <Download className="w-3 h-3" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+          </div>
+
+          {auditTab === "fault_history" ? (
+            displayedFaults.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400 flex flex-col items-center justify-center gap-1.5">
+                <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+                <span className="font-medium">No recorded faults on this vehicle. Safe operations log.</span>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-[10px] uppercase font-mono text-slate-400 bg-slate-50 border-b border-slate-100">
+                    <tr>
+                      <th className="py-2.5 px-3">Date & Time</th>
+                      <th className="py-2.5 px-3">State Event</th>
+                      <th className="py-2.5 px-3">Fault Details</th>
+                      <th className="py-2.5 px-3">Telemetry Snapshot</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {displayedFaults.map((rec) => (
+                      <tr key={rec.id} className="hover:bg-slate-50 transition">
+                        <td className="py-2.5 px-3 text-slate-600 font-sans">
+                          <div className="font-medium text-slate-800">{rec.time}</div>
+                          <div className="text-[10px] text-slate-400">{rec.date}</div>
+                        </td>
+                        <td className="py-2.5 px-3">
+                          {rec.eventType === "FAULT_INCEPTION" && (
+                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200 inline-flex items-center gap-1">
+                              <AlertOctagon className="w-3 h-3 text-rose-600" />
+                              <span>FAULT TRIGGERED</span>
+                            </span>
+                          )}
+                          {rec.eventType === "FAULT_ESCALATED" && (
+                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-rose-50 text-rose-800 border border-rose-300 inline-flex items-center gap-1">
+                              <ArrowUpRight className="w-3 h-3 text-rose-600" />
+                              <span>ESCALATED</span>
+                            </span>
+                          )}
+                          {rec.eventType === "FAULT_DEESCALATED" && (
+                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200 inline-flex items-center gap-1">
+                              <ArrowDownRight className="w-3 h-3 text-amber-600" />
+                              <span>DE-ESCALATED</span>
+                            </span>
+                          )}
+                          {rec.eventType === "RECOVERY_NORMAL" && (
+                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 inline-flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <span>RECOVERED</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-sans">
+                          <div className="font-semibold text-slate-900">{rec.label}</div>
+                        </td>
+                        <td className="py-2.5 px-3 text-[11px] text-slate-600 font-mono">
+                          V: {rec.voltage}V | I: {rec.current}A | RPM: {rec.rpm} | T: {rec.temp}°C
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : (
+            displayedLogs.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">No 60-second logs accumulated yet.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="text-[10px] uppercase text-slate-400 bg-slate-50 border-b border-slate-100">
+                    <tr>
+                      <th className="py-2 px-3">Date & Time</th>
+                      <th className="py-2 px-3">Voltage</th>
+                      <th className="py-2 px-3">Current</th>
+                      <th className="py-2 px-3">Speed</th>
+                      <th className="py-2 px-3">Battery Temp</th>
+                      <th className="py-2 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-[11px]">
+                    {displayedLogs.map((log) => (
+                      <tr key={log.id} className="hover:bg-slate-50 transition">
+                        <td className="py-2 px-3 text-slate-600 font-sans">{log.date} {log.time}</td>
+                        <td className="py-2 px-3 text-cyan-700 font-bold">{log.voltage} V</td>
+                        <td className="py-2 px-3 text-blue-700 font-bold">{log.current} A</td>
+                        <td className="py-2 px-3 text-indigo-700 font-bold">{log.rpm} RPM</td>
+                        <td className="py-2 px-3 text-amber-700 font-bold">{log.temperature} °C</td>
+                        <td className="py-2 px-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            log.faultClass === 0 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                          }`}>
+                            {log.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          )}
+        </div>
+
         {/* Profile Card View */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
           <div className="flex justify-between items-center pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
                 <ShieldCheck className="w-4 h-4 text-cyan-600" />
-                <span>Vehicle Owner Specification & Calibration Link</span>
+                <span>Vehicle Specification & Calibration Link</span>
               </h2>
-              <p className="text-xs text-slate-400">Registered parameters and manufacturer threshold binding</p>
+              <p className="text-xs text-slate-400">Registered vehicle parameters and manufacturer envelope binding</p>
             </div>
 
             <button

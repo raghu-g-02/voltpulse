@@ -1,4 +1,3 @@
-# backend/main.py
 import os
 import json
 import asyncio
@@ -24,7 +23,6 @@ active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
 vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
 
-# Singapore regional Firebase Realtime Database
 FIREBASE_RTDB_BASE = os.getenv(
     "FIREBASE_DATABASE_URL", 
     "https://major-pro-8b1c9-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -72,7 +70,7 @@ def bind_session(req: SessionBindRequest):
         "chassisNumber": chassis,
         "calibration": cal,
     }
-    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel} ({cal.get('voltage_nominal')}V / {cal.get('current_overload_limit')}A)")
+    print(f"[Session Bound] Chassis: {chassis} -> Model: {req.vehicleModel}")
     return {"status": "SUCCESS", "chassis": chassis, "calibration": cal}
 
 @app.post("/api/session/unbind")
@@ -95,14 +93,12 @@ def sync_model(req: ModelSyncRequest):
             sess["calibration"] = req.modelData
             updated_chassis.append(c)
 
-    print(f"[Model Synced] {req.modelId} updated across active sessions: {updated_chassis}")
     return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
 def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
 
-    # Handle unnesting
     if "live" in data and isinstance(data["live"], dict):
         data = data["live"]
     elif chassis in data and isinstance(data[chassis], dict):
@@ -132,13 +128,9 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     return None
 
 def fetch_firebase_telemetry(chassis: str) -> dict:
-    """
-    Dynamically fetches live telemetry from Firebase RTDB.
-    Primary Path matches your ESP32 target: /vehicles/{chassis}/live.json
-    """
     clean_chassis = chassis.strip().upper()
     lookup_paths = [
-        f"/vehicles/{clean_chassis}/live.json",   # Exact match for your ESP32 code
+        f"/vehicles/{clean_chassis}/live.json",
         f"/vehicles/{clean_chassis}.json",
         f"/{clean_chassis}.json",
         f"/{clean_chassis}/live.json",
@@ -202,10 +194,6 @@ def get_latest_state(chassis: str):
 
 @app.post("/api/simulate/{chassis}/{fault_class}")
 def simulate_fault(chassis: str, fault_class: int):
-    """
-    Allows executing a live fault demo from the UI dashboard
-    calibrated to the 3S 18650 12V testbench.
-    """
     c = chassis.strip().upper()
     session = active_vehicle_sessions.get(c, {
         "chassisNumber": c,
@@ -220,7 +208,6 @@ def simulate_fault(chassis: str, fault_class: int):
     rpm_max = float(cal.get("rpm_max_rated", 260))
 
     if fault_class == 0:
-        # Nominal 3S operation
         sim_data = {
             "Voltage": v_nom,
             "Current": round(float(cal.get("current_nominal", 0.20)), 2),
@@ -234,10 +221,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 1:
-        # Motor Overload / Jam: Current spikes to 1.15A while RPM drops to 30
         sim_data = {
             "Voltage": v_nom - 0.4,
-            "Current": round(i_crit * 1.35, 2), # ~1.15 A
+            "Current": round(i_crit * 1.35, 2),
             "Temperature": 32.0,
             "motor_rpm": 25.0,
             "ambient_temp": 26.4,
@@ -248,9 +234,8 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 2:
-        # Inverter Voltage Sag: Voltage drops below 9.8V cutoff
         sim_data = {
-            "Voltage": round(v_sag - 0.60, 2), # ~9.20 V
+            "Voltage": round(v_sag - 0.60, 2),
             "Current": 0.24,
             "Temperature": 29.5,
             "motor_rpm": round(rpm_max * 0.55),
@@ -262,11 +247,10 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 3:
-        # Thermal Runaway: Pack temperature reaches 41.5°C
         sim_data = {
             "Voltage": v_nom,
             "Current": 0.22,
-            "Temperature": round(t_crit + 3.5, 1), # ~41.5 °C
+            "Temperature": round(t_crit + 3.5, 1),
             "motor_rpm": round(rpm_max * 0.8),
             "ambient_temp": 26.4,
             "ambient_humidity": 52.0,
@@ -286,7 +270,7 @@ def simulate_fault(chassis: str, fault_class: int):
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
     c = chassis.strip().upper()
-    print(f"[WebSocket Connected] Live stream established for testbench: {c}")
+    print(f"[WebSocket Connected] Testbench stream established: {c}")
 
     try:
         while True:
@@ -317,6 +301,6 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
-        print(f"[WebSocket Disconnected] Client closed for testbench: {c}")
+        print(f"[WebSocket Disconnected] Client closed: {c}")
     except Exception as e:
         print(f"[WebSocket Error] {e}")

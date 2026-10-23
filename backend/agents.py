@@ -15,28 +15,21 @@ FAULT_NAME_MAP = {
     4: "Drivetrain Severe Mechanical Vibration & Imbalance",
 }
 
-# Calibrated directly for your 3S 18650 Battery + TT Motor Testbench
 DEFAULT_HARDWARE_CALIBRATION = {
     "modelName": "3S Hardware Testbench (12V L298N)",
     "manufacturer": "VoltPulse Lab Rig",
-    "voltage_nominal": 11.8,          # Nominal 3S Pack Voltage (11.1V - 12.6V)
-    "voltage_sag_limit": 9.8,          # Cutoff threshold when pack collapses under drain
-    "current_nominal": 0.20,           # Free-running idle draw with L298N (~0.18A - 0.22A)
-    "current_overload_limit": 0.85,    # Stall threshold when TT motor wheel is held by hand
-    "temp_nominal": 28.0,              # Ambient pack baseline
-    "temp_critical_limit": 38.0,       # Demo-friendly cutoff easily reached with warm fingers
-    "rpm_max_rated": 260,              # TT Motor free-run speed at ~62% duty cycle (PWM 160)
-    "vibration_nominal": 9.81,         # Baseline 1G Earth gravity on Z-axis
-    "vibration_limit": 2.2,            # Lateral vibration limit on X/Y plane in m/s^2
+    "voltage_nominal": 11.8,
+    "voltage_sag_limit": 9.8,
+    "current_nominal": 0.20,
+    "current_overload_limit": 0.85,
+    "temp_nominal": 28.0,
+    "temp_critical_limit": 38.0,
+    "rpm_max_rated": 260,
+    "vibration_nominal": 9.81,
+    "vibration_limit": 2.2,
 }
 
 class PredictiveDiagnosticAgent:
-    """
-    Evaluates multi-channel telemetry against model-specific calibration envelopes.
-    Converts physical readings from the 3S battery and TT motor into normalized 
-    stress ratios (0.0 to 1.0+ scale) for the XGBoost ML model.
-    """
-
     def diagnose(self, telemetry: dict, model_calibration: dict = None) -> dict:
         v = float(telemetry.get("Voltage", telemetry.get("bus_voltage", 0.0)))
         i = float(telemetry.get("Current", telemetry.get("current_amps", 0.0)))
@@ -47,7 +40,6 @@ class PredictiveDiagnosticAgent:
         vib_x = float(telemetry.get("vibration_x", 0.0))
         vib_y = float(telemetry.get("vibration_y", 0.0))
         vib_z = float(telemetry.get("vibration_z", 9.81))
-        chassis = telemetry.get("chassis", "UNKNOWN_CHASSIS")
 
         limits = model_calibration if model_calibration and isinstance(model_calibration, dict) else DEFAULT_HARDWARE_CALIBRATION
 
@@ -59,7 +51,7 @@ class PredictiveDiagnosticAgent:
         vib_limit = float(limits.get("vibration_limit", 2.2))
         model_name = limits.get("modelName", "3S Hardware Testbench")
 
-        # Standby / Cold-Boot Filter
+        # Standby filter
         if v <= 1.0 and t <= 1.0:
             return {
                 "fault_class": 0,
@@ -92,13 +84,11 @@ class PredictiveDiagnosticAgent:
                 },
             }
 
-        # 1. Normalized Stress Factors (0.0 to 1.0+ scale)
         norm_v_sag = max(0.0, (v_nom - v) / max(0.1, (v_nom - v_sag))) if v > 1.0 else 0.0
         norm_i_overload = i / max(0.05, i_crit)
         norm_t_overheat = max(0.0, (t - amb_t) / max(1.0, (t_crit - amb_t))) if t > amb_t else 0.0
         norm_rpm = rpm / max(1.0, rpm_max)
 
-        # Lateral vibration magnitude from MPU6050
         lateral_vib = math.sqrt(vib_x**2 + vib_y**2)
         norm_vib = lateral_vib / max(0.5, vib_limit)
 
@@ -108,8 +98,6 @@ class PredictiveDiagnosticAgent:
         active_fault_items = []
         fault_classes_detected = set()
 
-        # Fault 1: Motor Transmission Overload or Rotor Stall
-        # (Triggered when current >= 0.85A or wheel is physically held down while powered)
         if norm_i_overload >= 1.0 or (i >= 0.65 and rpm < 35) or ml_fault_class == 1:
             fault_classes_detected.add(1)
             active_fault_items.append({
@@ -121,7 +109,6 @@ class PredictiveDiagnosticAgent:
                 "threshold_breach": f"{i:.2f}A draw >= {i_crit:.2f}A limit ({norm_i_overload*100:.0f}% load)",
             })
 
-        # Fault 2: 3S Battery Inverter Rail Voltage Sag
         if (norm_v_sag >= 1.0 and v > 1.0) or ml_fault_class == 2:
             fault_classes_detected.add(2)
             active_fault_items.append({
@@ -133,7 +120,6 @@ class PredictiveDiagnosticAgent:
                 "threshold_breach": f"{v:.2f}V <= {v_sag:.2f}V cutoff limit ({norm_v_sag*100:.0f}% sag stress)",
             })
 
-        # Fault 3: Battery Pack Thermal Overheat
         if norm_t_overheat >= 1.0 or t >= t_crit or ml_fault_class == 3:
             fault_classes_detected.add(3)
             active_fault_items.append({
@@ -142,10 +128,9 @@ class PredictiveDiagnosticAgent:
                 "subsystem": "Battery Cell Enclosure (DS18B20 Probe)",
                 "severity": "EMERGENCY",
                 "dtc": "DTC-THERM-303",
-                "threshold_breach": f"{t:.1f}°C >= {t_crit:.1f}°C limit (Thermal rise delta: +{(t - amb_t):.1f}°C)",
+                "threshold_breach": f"{t:.1f}°C >= {t_crit:.1f}°C limit (Rise: +{(t - amb_t):.1f}°C)",
             })
 
-        # Fault 4: Severe Mechanical Vibration
         if norm_vib >= 1.0:
             fault_classes_detected.add(1)
             active_fault_items.append({
@@ -217,8 +202,6 @@ class PredictiveDiagnosticAgent:
 
 
 class AutonomousOutreachAgent:
-    """Generates natural voice advisories and dispatches vehicle alerts."""
-
     def __init__(self):
         self.last_email_sent_times = {}
         self.EMAIL_COOLDOWN_SECONDS = 180
@@ -255,7 +238,7 @@ class AutonomousOutreachAgent:
 
         recipient_email = active_owner.get("email")
         chassis = active_owner.get("chassisNumber", raw_telemetry.get("chassis", "MAT612089N1A23456"))
-        if not recipient_email:
+        if not recipient_email or not SENDER_APP_PASSWORD:
             return
 
         current_time = time.time()
@@ -366,6 +349,5 @@ class MasterOrchestratorAgent:
             },
             "booking": booking,
         }
-
 
 orchestrator = MasterOrchestratorAgent()

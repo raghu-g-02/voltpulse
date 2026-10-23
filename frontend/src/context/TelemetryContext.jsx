@@ -1,4 +1,3 @@
-// src/context/TelemetryContext.jsx
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { collection, doc, setDoc, query, orderBy, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
@@ -10,7 +9,6 @@ const FAULT_NAMES = {
   3: "Battery Thermal Overheat",
 };
 
-// Explicit cross-platform date and time standardizers (Forces DD/MM/YYYY and uppercase AM/PM)
 const formatEVDate = (d) => {
   const day = String(d.getDate()).padStart(2, "0");
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -37,12 +35,13 @@ const defaultContextValue = {
     ambient_humidity: 50.0,
     vibration_x: 0.05,
     vibration_y: 0.08,
-    vibration_z: 9.82
+    vibration_z: 9.81
   },
   agentResult: null,
   source: "STANDBY",
   history: [],
   faultHistory: [],
+  telemetryLogs: [],
   isSimulating: false,
   triggerSimulation: () => {},
   isVoiceMuted: true,
@@ -52,7 +51,6 @@ const defaultContextValue = {
 
 const TelemetryContext = createContext(defaultContextValue);
 
-// Sanitized API base URL
 const rawApiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const API_BASE = rawApiBase.replace(/\/$/, "");
 
@@ -67,6 +65,7 @@ export function TelemetryProvider({ children }) {
   const [history, setHistory] = useState([]);
   const [isSimulating, setIsSimulating] = useState(false);
   const [faultHistory, setFaultHistory] = useState([]);
+  const [telemetryLogs, setTelemetryLogs] = useState([]);
 
   const [isVoiceMuted, setIsVoiceMuted] = useState(() => {
     try {
@@ -76,7 +75,6 @@ export function TelemetryProvider({ children }) {
     }
   });
 
-  // Decoupled refs to store fresh incoming data without resetting intervals
   const latestTelemetryRef = useRef(telemetry);
   const latestAgentResultRef = useRef(agentResult);
 
@@ -90,7 +88,6 @@ export function TelemetryProvider({ children }) {
 
   const lastSpokenSignatureRef = useRef(null);
   const hasSpokenInitialGreetingRef = useRef(false);
-  const isLoggingTransitionRef = useRef(false);
   const lastProcessedSignatureRef = useRef(null);
 
   const toggleVoiceMute = () => {
@@ -115,7 +112,7 @@ export function TelemetryProvider({ children }) {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Bind session to user's chassis
+  // Bind session to active chassis
   useEffect(() => {
     if (isAdmin || !userChassis || !userProfile?.email) return;
 
@@ -125,17 +122,18 @@ export function TelemetryProvider({ children }) {
       body: JSON.stringify({
         userId: userProfile.userId || "OWN-DEFAULT",
         vehicleId: userProfile.vehicleId || "VEH-DEFAULT",
-        vehicleModel: userProfile.vehicleModel || "Tata Nexon EV",
+        vehicleModel: userProfile.vehicleModel || "3S Hardware Testbench (12V L298N)",
         email: userProfile.email,
         fullName: userProfile.fullName || "Vehicle Owner",
-        chassisNumber: userChassis
+        chassisNumber: userChassis,
+        calibration: userProfile.calibration || null
       })
     })
       .then((res) => res.json())
       .catch((err) => console.error(`[Multi-Tenant Bind Error for ${userChassis}]:`, err));
   }, [userProfile, isAdmin, userChassis]);
 
-  // Real-time Firestore sync for Fault & Recovery History
+  // Real-time Firestore sync for Fault History
   useEffect(() => {
     if (!currentUser || isAdmin) return;
     const incidentsRef = collection(db, "users", currentUser.uid, "fault_history");
@@ -148,13 +146,32 @@ export function TelemetryProvider({ children }) {
       });
       setFaultHistory(records);
     }, (error) => {
-      console.error("Firestore history listener error:", error);
+      console.error("Firestore fault history listener error:", error);
     });
 
     return () => unsubscribe();
   }, [currentUser, isAdmin]);
 
-  // 1. CONTINUOUS 60-SECOND SENSOR LOGGER (Deduplicated Across Multiple Devices via Minute-Bucket Key)
+  // Real-time Firestore sync for 60s Telemetry Logs
+  useEffect(() => {
+    if (!currentUser || isAdmin) return;
+    const logsRef = collection(db, "users", currentUser.uid, "telemetry_logs");
+    const q = query(logsRef, orderBy("timestampRaw", "desc"));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const records = [];
+      snapshot.forEach((docSnap) => {
+        records.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      setTelemetryLogs(records);
+    }, (error) => {
+      console.error("Firestore telemetry logs listener error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [currentUser, isAdmin]);
+
+  // Continuous 60-Second Sensor Logger
   useEffect(() => {
     if (!currentUser || isAdmin || !userChassis) return;
 
@@ -165,14 +182,12 @@ export function TelemetryProvider({ children }) {
       const v = parseFloat(tel?.Voltage ?? tel?.bus_voltage ?? 0);
       const temp = parseFloat(tel?.Temperature ?? tel?.motor_temp ?? 0);
 
-      // Skip uninitialized cold-boot readings
       if (v <= 0.5 && temp <= 1.0) return;
 
       const now = new Date();
       const currentClass = agent?.diagnosis?.fault_class ?? 0;
       const currentLabel = agent?.diagnosis?.diagnosis_label || (currentClass === 0 ? "Normal Operation" : "Fault Detected");
 
-      // Idempotent document key: only one entry per vehicle per minute regardless of open devices
       const minuteBucket = Math.floor(now.getTime() / 60000);
       const logDocId = `LOG_${userChassis}_${minuteBucket}`;
 
@@ -200,7 +215,7 @@ export function TelemetryProvider({ children }) {
     return () => clearInterval(timer);
   }, [currentUser, isAdmin, userChassis]);
 
-  // 2. DYNAMIC FAULT INCREASE / DECREASE / RECOVERY LOGGER (Deterministic & Deduplicated)
+  // Fault Transition Logger
   useEffect(() => {
     if (!agentResult || !currentUser || isAdmin || !userChassis) return;
 
@@ -218,15 +233,10 @@ export function TelemetryProvider({ children }) {
     const v = parseFloat(tel?.Voltage ?? tel?.bus_voltage ?? 0);
     const temp = parseFloat(tel?.Temperature ?? tel?.motor_temp ?? 0);
 
-    // Skip uninitialized hardware standby
     if (v <= 0.5 && temp <= 1.0) return;
-
-    // Local in-memory lock
     if (lastProcessedSignatureRef.current === currentSignature) return;
 
     const lastEvent = faultHistory.length > 0 ? faultHistory[0] : null;
-
-    // Cross-device guard: if another device already wrote this exact signature in the last 15 seconds, absorb it
     if (lastEvent && (lastEvent.signature ?? "") === currentSignature && (Date.now() - (lastEvent.timestampRaw || 0) < 15000)) {
       lastProcessedSignatureRef.current = currentSignature;
       return;
@@ -277,11 +287,9 @@ export function TelemetryProvider({ children }) {
         transitionLabel = `Fault Shifted: Cleared ${clearedNames.join(" & ")}, Added ${addedNames.join(" & ")}. Active: ${activeNames.join(" & ")}`;
       }
 
-      // Lock locally immediately
       lastProcessedSignatureRef.current = currentSignature;
 
       const now = new Date();
-      // 15-second time bucket prevents multiple open tabs/devices from generating duplicate entries
       const timeBucket = Math.floor(now.getTime() / 15000);
       const docId = `EVT_${userChassis}_${eventType}_${currentSignature || "SAFE"}_${timeBucket}`;
 
@@ -330,7 +338,7 @@ export function TelemetryProvider({ children }) {
     });
   };
 
-  // Co-Pilot Voice playback: Speaks when signature changes
+  // Co-Pilot Voice playback
   useEffect(() => {
     if (isAdmin || isVoiceMuted || !agentResult) return;
 
@@ -367,7 +375,7 @@ export function TelemetryProvider({ children }) {
     }
   }, [agentResult, isVoiceMuted, isAdmin]);
 
-  // WebSocket lifecycle management per chassis (Production wss:// and local ws:// compatible)
+  // WebSocket lifecycle management
   useEffect(() => {
     if (isAdmin || !userChassis) return;
 
@@ -420,7 +428,7 @@ export function TelemetryProvider({ children }) {
     connect();
 
     return () => {
-      if (ws) ws.close(1000, `User logged out (${userChassis})`);
+      if (ws) ws.close(1000, `User closed session (${userChassis})`);
       if (fallbackInterval) clearInterval(fallbackInterval);
       if (typeof window !== "undefined" && window.speechSynthesis) {
         window.speechSynthesis.cancel();
@@ -467,6 +475,7 @@ export function TelemetryProvider({ children }) {
       source,
       history,
       faultHistory,
+      telemetryLogs,
       isSimulating,
       triggerSimulation,
       isVoiceMuted,
