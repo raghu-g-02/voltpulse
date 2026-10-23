@@ -22,7 +22,9 @@ app.add_middleware(
 active_vehicle_sessions: Dict[str, Dict[str, Any]] = {}
 vehicle_models_catalog: Dict[str, Dict[str, Any]] = {}
 active_simulations: Dict[str, Dict[str, Any]] = {}
+simulation_tasks: Dict[str, asyncio.Task] = {}
 
+# Singapore regional Firebase Realtime Database
 FIREBASE_RTDB_BASE = os.getenv(
     "FIREBASE_DATABASE_URL", 
     "https://major-pro-8b1c9-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -51,6 +53,7 @@ def read_root():
         "system": "VoltPulse AI Multi-Tenant Concurrent Engine",
         "database_endpoint": FIREBASE_RTDB_BASE,
         "active_vehicle_sessions": list(active_vehicle_sessions.keys()),
+        "active_simulations": list(active_simulations.keys()),
         "cached_models": list(vehicle_models_catalog.keys()),
         "total_active_sessions": len(active_vehicle_sessions),
     }
@@ -99,6 +102,7 @@ def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
 
+    # Handle unnesting
     if "live" in data and isinstance(data["live"], dict):
         data = data["live"]
     elif chassis in data and isinstance(data[chassis], dict):
@@ -162,14 +166,24 @@ def fetch_firebase_telemetry(chassis: str) -> dict:
         "chassis": clean_chassis,
     }
 
+async def revert_simulation_after_delay(chassis: str, delay_seconds: float = 10.0):
+    """Background coroutine that expires demo injection after 10 seconds."""
+    try:
+        await asyncio.sleep(delay_seconds)
+        if chassis in active_simulations:
+            del active_simulations[chassis]
+            print(f"[Simulation Auto-Reset] 10s expired for {chassis}. Automatically reverted to live Firebase RTDB.")
+    except asyncio.CancelledError:
+        pass
+
 @app.get("/api/telemetry/{chassis}")
 def get_telemetry(chassis: str):
     c = chassis.strip().upper()
     sim = active_simulations.get(c)
     if sim:
-        return {"source": f"SIMULATION_{c}", "telemetry": sim}
+        return {"source": f"SIMULATION_{c}", "telemetry": sim, "is_simulating": True}
     tel = fetch_firebase_telemetry(c)
-    return {"source": f"FIREBASE_LIVE_{c}", "telemetry": tel}
+    return {"source": f"FIREBASE_LIVE_{c}", "telemetry": tel, "is_simulating": False}
 
 @app.get("/api/state/latest/{chassis}")
 def get_latest_state(chassis: str):
@@ -185,15 +199,21 @@ def get_latest_state(chassis: str):
     if sim:
         raw_tel = sim
         src = f"SIMULATION_{c}"
+        sim_active = True
     else:
         raw_tel = fetch_firebase_telemetry(c)
         src = f"FIREBASE_LIVE_{c}"
+        sim_active = False
 
     res = orchestrator.process_telemetry(raw_tel, session)
-    return {"source": src, "telemetry": raw_tel, "agent_result": res}
+    return {"source": src, "telemetry": raw_tel, "agent_result": res, "is_simulating": sim_active}
 
 @app.post("/api/simulate/{chassis}/{fault_class}")
-def simulate_fault(chassis: str, fault_class: int):
+async def simulate_fault(chassis: str, fault_class: int):
+    """
+    Overrides live telemetry with demo values for EXACTLY 10 SECONDS,
+    then automatically reverts back to live Firebase RTDB.
+    """
     c = chassis.strip().upper()
     session = active_vehicle_sessions.get(c, {
         "chassisNumber": c,
@@ -207,7 +227,12 @@ def simulate_fault(chassis: str, fault_class: int):
     t_crit = float(cal.get("temp_critical_limit", 38.0))
     rpm_max = float(cal.get("rpm_max_rated", 260))
 
+    # Cancel previous timer if still running
+    if c in simulation_tasks and not simulation_tasks[c].done():
+        simulation_tasks[c].cancel()
+
     if fault_class == 0:
+        # Reset to Nominal
         sim_data = {
             "Voltage": v_nom,
             "Current": round(float(cal.get("current_nominal", 0.20)), 2),
@@ -221,9 +246,10 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 1:
+        # Motor Overload / Jam: Current spikes to 1.15A while RPM stalls to 25
         sim_data = {
             "Voltage": v_nom - 0.4,
-            "Current": round(i_crit * 1.35, 2),
+            "Current": round(i_crit * 1.35, 2),  # ~1.15 A
             "Temperature": 32.0,
             "motor_rpm": 25.0,
             "ambient_temp": 26.4,
@@ -234,8 +260,9 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 2:
+        # Inverter Voltage Sag: Pack voltage drops below 9.8V cutoff
         sim_data = {
-            "Voltage": round(v_sag - 0.60, 2),
+            "Voltage": round(v_sag - 0.60, 2),  # ~9.20 V
             "Current": 0.24,
             "Temperature": 29.5,
             "motor_rpm": round(rpm_max * 0.55),
@@ -247,10 +274,11 @@ def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 3:
+        # Thermal Runaway: Pack temperature reaches 41.5°C
         sim_data = {
             "Voltage": v_nom,
             "Current": 0.22,
-            "Temperature": round(t_crit + 3.5, 1),
+            "Temperature": round(t_crit + 3.5, 1),  # ~41.5 °C
             "motor_rpm": round(rpm_max * 0.8),
             "ambient_temp": 26.4,
             "ambient_humidity": 52.0,
@@ -259,12 +287,49 @@ def simulate_fault(chassis: str, fault_class: int):
             "vibration_z": 9.81,
             "chassis": c,
         }
+    elif fault_class == 4:
+        # Excessive Mechanical Vibration: Lateral vibration spikes on MPU6050
+        sim_data = {
+            "Voltage": v_nom,
+            "Current": 0.35,
+            "Temperature": 30.0,
+            "motor_rpm": round(rpm_max * 0.9),
+            "ambient_temp": 26.4,
+            "ambient_humidity": 52.0,
+            "vibration_x": 1.85,
+            "vibration_y": 1.70,
+            "vibration_z": 9.81,
+            "chassis": c,
+        }
     else:
-        raise HTTPException(status_code=400, detail="Invalid fault class (0-3)")
+        raise HTTPException(status_code=400, detail="Invalid fault class (0-4)")
 
     active_simulations[c] = sim_data
     agent_res = orchestrator.process_telemetry(sim_data, session)
-    return {"status": "SUCCESS", "state": {"source": f"SIMULATION_{c}", "telemetry": sim_data, "agent_result": agent_res}}
+
+    # Schedule automatic 10-second expiration back to live telemetry
+    simulation_tasks[c] = asyncio.create_task(revert_simulation_after_delay(c, 10.0))
+
+    return {
+        "status": "SUCCESS",
+        "duration_seconds": 10.0,
+        "state": {
+            "source": f"SIMULATION_{c}",
+            "telemetry": sim_data,
+            "agent_result": agent_res,
+            "is_simulating": True
+        }
+    }
+
+@app.post("/api/simulate/{chassis}/reset")
+def reset_simulation(chassis: str):
+    """Immediately clears simulation and returns to live Firebase RTDB."""
+    c = chassis.strip().upper()
+    if c in simulation_tasks and not simulation_tasks[c].done():
+        simulation_tasks[c].cancel()
+    if c in active_simulations:
+        del active_simulations[c]
+    return {"status": "SUCCESS", "message": f"Reverted {c} to live Firebase RTDB"}
 
 @app.websocket("/ws/telemetry/{chassis}")
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
@@ -285,9 +350,11 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
             if sim:
                 raw_tel = sim
                 src = f"SIMULATION_{c}"
+                sim_active = True
             else:
                 raw_tel = fetch_firebase_telemetry(c)
                 src = f"FIREBASE_LIVE_{c}"
+                sim_active = False
 
             agent_res = orchestrator.process_telemetry(raw_tel, session)
 
@@ -295,6 +362,7 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
                 "source": src,
                 "telemetry": raw_tel,
                 "agent_result": agent_res,
+                "is_simulating": sim_active,
                 "calibration": session.get("calibration", DEFAULT_HARDWARE_CALIBRATION),
             }
 

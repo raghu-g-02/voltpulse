@@ -1,3 +1,4 @@
+// src/context/TelemetryContext.jsx
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { collection, doc, setDoc, query, orderBy, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
@@ -7,6 +8,7 @@ const FAULT_NAMES = {
   1: "Motor Transmission Overload",
   2: "Inverter Voltage Sag",
   3: "Battery Thermal Overheat",
+  4: "Drivetrain Severe Vibration",
 };
 
 const formatEVDate = (d) => {
@@ -43,8 +45,10 @@ const defaultContextValue = {
   faultHistory: [],
   telemetryLogs: [],
   isSimulating: false,
+  simulationCountdown: 0,
   triggerSimulation: () => {},
-  isVoiceMuted: true,
+  resetSimulation: () => {},
+  isVoiceMuted: false,
   toggleVoiceMute: () => {},
   speakText: () => {}
 };
@@ -57,15 +61,19 @@ const API_BASE = rawApiBase.replace(/\/$/, "");
 export function TelemetryProvider({ children }) {
   const { userProfile, currentUser, userRole } = useAuth();
   const isAdmin = userRole === "admin";
-  const userChassis = (userProfile?.chassisNumber || "").trim().toUpperCase();
+  const userChassis = (userProfile?.chassisNumber || "MAT612089N1A23456").trim().toUpperCase();
 
   const [telemetry, setTelemetry] = useState(defaultContextValue.telemetry);
   const [agentResult, setAgentResult] = useState(null);
   const [source, setSource] = useState("STANDBY");
   const [history, setHistory] = useState([]);
-  const [isSimulating, setIsSimulating] = useState(false);
   const [faultHistory, setFaultHistory] = useState([]);
   const [telemetryLogs, setTelemetryLogs] = useState([]);
+
+  // 10-Second Simulation States
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulationCountdown, setSimulationCountdown] = useState(0);
+  const countdownIntervalRef = useRef(null);
 
   const [isVoiceMuted, setIsVoiceMuted] = useState(() => {
     try {
@@ -112,7 +120,7 @@ export function TelemetryProvider({ children }) {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Bind session to active chassis
+  // Bind session to user's chassis
   useEffect(() => {
     if (isAdmin || !userChassis || !userProfile?.email) return;
 
@@ -152,7 +160,7 @@ export function TelemetryProvider({ children }) {
     return () => unsubscribe();
   }, [currentUser, isAdmin]);
 
-  // Real-time Firestore sync for 60s Telemetry Logs
+  // Real-time Firestore sync for 60s Logs
   useEffect(() => {
     if (!currentUser || isAdmin) return;
     const logsRef = collection(db, "users", currentUser.uid, "telemetry_logs");
@@ -171,7 +179,7 @@ export function TelemetryProvider({ children }) {
     return () => unsubscribe();
   }, [currentUser, isAdmin]);
 
-  // Continuous 60-Second Sensor Logger
+  // Continuous 60-Second Telemetry Logger
   useEffect(() => {
     if (!currentUser || isAdmin || !userChassis) return;
 
@@ -215,7 +223,7 @@ export function TelemetryProvider({ children }) {
     return () => clearInterval(timer);
   }, [currentUser, isAdmin, userChassis]);
 
-  // Fault Transition Logger
+  // Fault Transition & Recovery State Logger
   useEffect(() => {
     if (!agentResult || !currentUser || isAdmin || !userChassis) return;
 
@@ -275,7 +283,7 @@ export function TelemetryProvider({ children }) {
         transitionLabel = `Initial Fault Inception (${currentCount} Active): Detected ${activeNames.join(" & ")}`;
       } else if (currentCount === 0 && prevCount > 0) {
         eventType = "RECOVERY_NORMAL";
-        transitionLabel = `Restored to Safe Operation: Cleared ${clearedNames.join(" & ")}`;
+        transitionLabel = `Restored to Safe Operation: Cleared ${clearedNames.join(" & ")}. Safe to drive.`;
       } else if (currentCount > prevCount) {
         eventType = "FAULT_ESCALATED";
         transitionLabel = `Faults Increased (${prevCount} → ${currentCount}): Added ${addedNames.join(" & ")}. Active: ${activeNames.join(" & ")}`;
@@ -338,7 +346,7 @@ export function TelemetryProvider({ children }) {
     });
   };
 
-  // Co-Pilot Voice playback
+  // Co-Pilot Voice playback: Speaks on fault trigger AND speaks on safe recovery
   useEffect(() => {
     if (isAdmin || isVoiceMuted || !agentResult) return;
 
@@ -361,8 +369,9 @@ export function TelemetryProvider({ children }) {
         lastSpokenSignatureRef.current = "SAFE";
         return;
       }
+      // Speak recovery announcement when returning from a fault!
       if (lastSpokenSignatureRef.current !== null && lastSpokenSignatureRef.current !== "SAFE") {
-        speakText(script);
+        speakText("System recovered. All powertrain parameters have normalized. It is now safe and fine to drive.");
         lastSpokenSignatureRef.current = "SAFE";
         return;
       }
@@ -375,7 +384,7 @@ export function TelemetryProvider({ children }) {
     }
   }, [agentResult, isVoiceMuted, isAdmin]);
 
-  // WebSocket lifecycle management
+  // WebSocket Live Stream per Chassis
   useEffect(() => {
     if (isAdmin || !userChassis) return;
 
@@ -398,6 +407,9 @@ export function TelemetryProvider({ children }) {
           }
           if (data.agent_result) setAgentResult(data.agent_result);
           if (data.source) setSource(data.source);
+          if (typeof data.is_simulating === "boolean") {
+            setIsSimulating(data.is_simulating);
+          }
         };
         ws.onerror = () => setSource("POLLING_FALLBACK");
         ws.onclose = () => {
@@ -420,6 +432,9 @@ export function TelemetryProvider({ children }) {
         }
         if (data.agent_result) setAgentResult(data.agent_result);
         if (data.source) setSource(data.source);
+        if (typeof data.is_simulating === "boolean") {
+          setIsSimulating(data.is_simulating);
+        }
       } catch (e) {
         setSource("DISCONNECTED");
       }
@@ -449,9 +464,29 @@ export function TelemetryProvider({ children }) {
     };
   }, [isAdmin, userChassis]);
 
+  // 10-Second Countdown Simulation Trigger
   const triggerSimulation = async (faultClass) => {
     if (!userChassis) return;
+
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+    }
+
     setIsSimulating(true);
+    setSimulationCountdown(10);
+
+    // Frontend 10-second countdown ticker
+    countdownIntervalRef.current = setInterval(() => {
+      setSimulationCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(countdownIntervalRef.current);
+          setIsSimulating(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
     try {
       const res = await fetch(`${API_BASE}/api/simulate/${userChassis}/${faultClass}`, { method: "POST" });
       const data = await res.json();
@@ -462,9 +497,25 @@ export function TelemetryProvider({ children }) {
         updateRollingHistory(data.state.telemetry);
       }
     } catch (e) {
-      console.error(`Simulation failed for ${userChassis}:`, e);
-    } finally {
+      console.error(`Simulation trigger failed for ${userChassis}:`, e);
       setIsSimulating(false);
+      setSimulationCountdown(0);
+      clearInterval(countdownIntervalRef.current);
+    }
+  };
+
+  const resetSimulation = async () => {
+    if (!userChassis) return;
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+    }
+    setIsSimulating(false);
+    setSimulationCountdown(0);
+
+    try {
+      await fetch(`${API_BASE}/api/simulate/${userChassis}/reset`, { method: "POST" });
+    } catch (e) {
+      console.error("Reset simulation error:", e);
     }
   };
 
@@ -477,7 +528,9 @@ export function TelemetryProvider({ children }) {
       faultHistory,
       telemetryLogs,
       isSimulating,
+      simulationCountdown,
       triggerSimulation,
+      resetSimulation,
       isVoiceMuted,
       toggleVoiceMute,
       speakText

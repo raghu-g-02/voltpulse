@@ -1,3 +1,4 @@
+// src/pages/UserDashboard.jsx
 import React, { useState } from "react";
 import Navbar from "../components/Navbar";
 import EditProfileModal from "../components/EditProfileModal";
@@ -7,7 +8,8 @@ import {
   Zap, Activity, Gauge, Thermometer, Wind, Droplets, 
   AlertOctagon, CheckCircle2, Volume2, VolumeX, 
   Edit3, ShieldCheck, Cpu, Waves, Play, RotateCcw,
-  Clock, Download, Filter, ArrowUpDown, ArrowUpRight, ArrowDownRight, ArrowLeft
+  Clock, Download, Filter, ArrowUpDown, ArrowUpRight, ArrowDownRight, ArrowLeft,
+  Timer, Compass
 } from "lucide-react";
 
 export default function UserDashboard({ onBackToHome, onOpenAbout }) {
@@ -19,6 +21,9 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
     isVoiceMuted, 
     toggleVoiceMute,
     triggerSimulation,
+    resetSimulation,
+    isSimulating,
+    simulationCountdown,
     faultHistory,
     telemetryLogs
   } = useTelemetry();
@@ -54,6 +59,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
   const diagnosis = agentResult?.diagnosis;
   const isFaultActive = diagnosis?.fault_class !== 0 && diagnosis?.fault_class !== undefined;
   const faultLabel = diagnosis?.diagnosis_label || "Nominal Operation";
+  const driverSuggestion = diagnosis?.driver_suggestion || "All systems nominal. Safe and fine to drive.";
 
   // Filter & Sort Fault History
   let displayedFaults = [...faultHistory];
@@ -111,7 +117,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
             </div>
             <h1 className="text-2xl font-black text-slate-900 mt-1">Vehicle Telematics Cockpit</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              Telemetry feed: <strong className="font-mono text-cyan-700">{source || "STANDBY"}</strong>
+              Live feed: <strong className="font-mono text-cyan-700">{source || "STANDBY"}</strong>
             </p>
           </div>
 
@@ -148,8 +154,8 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           </div>
         </div>
 
-        {/* Status Alert Banner */}
-        <div className={`p-4 rounded-2xl border flex items-center justify-between transition-all ${
+        {/* Real-time Status Alert & Driver Suggestion Banner */}
+        <div className={`p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-all ${
           !isFaultActive
             ? "border-emerald-200 bg-emerald-50 text-emerald-900 shadow-sm"
             : "border-rose-300 bg-rose-50 text-rose-900 shadow-sm"
@@ -161,63 +167,88 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
               <AlertOctagon className="w-6 h-6 text-rose-600 flex-shrink-0 animate-bounce" />
             )}
             <div>
-              <div className="text-sm font-bold">
-                {!isFaultActive ? `Status: SAFE (${cal.modelName})` : `Safety Breach: ${faultLabel}`}
+              <div className="text-sm font-bold flex items-center gap-2">
+                <span>{!isFaultActive ? `Status: SAFE (${cal.modelName})` : `Safety Hazard: ${faultLabel}`}</span>
+                {!isFaultActive && (
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                    Safe to Drive
+                  </span>
+                )}
               </div>
-              <div className="text-xs opacity-90 mt-0.5">
-                Calibrated limits: Voltage &gt; {cal.voltage_sag_limit}V, Current &lt; {cal.current_overload_limit}A, Temp &lt; {cal.temp_critical_limit}°C.
+              <div className="text-xs font-semibold opacity-90 mt-0.5 flex items-center gap-1 text-slate-700">
+                <Compass className="w-3.5 h-3.5 text-cyan-700 flex-shrink-0" />
+                <span>Recommendation: {driverSuggestion}</span>
               </div>
             </div>
           </div>
-          <span className={`text-xs px-3 py-1 rounded-full font-bold ${
+          
+          <span className={`text-xs px-3 py-1 rounded-full font-bold flex-shrink-0 ${
             !isFaultActive ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"
           }`}>
-            {!isFaultActive ? "Nominal" : "Fault Active"}
+            {!isFaultActive ? "Nominal Safe" : "Action Required"}
           </span>
         </div>
 
-        {/* Live Simulation Panel */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
-          <div>
-            <span className="font-bold text-slate-800 uppercase tracking-wider text-[11px] block">
-              Live Hardware Demo Controls
-            </span>
-            <span className="text-slate-400 text-[11px]">
-              Simulate or clear fault triggers to demonstrate real-time AI diagnosis and voice outreach.
-            </span>
+        {/* Interactive 10-Second Demo Simulation Controls */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3 text-xs">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+            <div>
+              <span className="font-bold text-slate-900 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                <Play className="w-3.5 h-3.5 text-cyan-600" />
+                <span>Hardware Testbench Simulation Controls (10-Second Auto-Reset)</span>
+              </span>
+              <span className="text-slate-400 text-[11px]">
+                Injects test fault states to demonstrate real-time AI classification and voice advisory. Resets to live RTDB after 10s.
+              </span>
+            </div>
+
+            {isSimulating && (
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 font-bold text-xs animate-pulse">
+                <Timer className="w-4 h-4 text-amber-600" />
+                <span>Demo Overriding RTDB: {simulationCountdown}s remaining</span>
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              onClick={() => triggerSimulation(0)}
-              className="px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold transition flex items-center gap-1"
-            >
-              <RotateCcw className="w-3 h-3 text-emerald-600" />
-              <span>Reset Nominal</span>
-            </button>
-
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100">
             <button
               onClick={() => triggerSimulation(1)}
-              className="px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1"
+              className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
-              <Play className="w-3 h-3 text-rose-600" />
-              <span>Motor Stall (1.15A)</span>
+              <Play className="w-3.5 h-3.5 text-rose-600" />
+              <span>1. Motor Stall / Overload (1.15A)</span>
             </button>
 
             <button
               onClick={() => triggerSimulation(2)}
-              className="px-2.5 py-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold transition flex items-center gap-1"
+              className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
-              <Play className="w-3 h-3 text-amber-600" />
-              <span>Voltage Sag (9.2V)</span>
+              <Play className="w-3.5 h-3.5 text-amber-600" />
+              <span>2. Battery Sag (9.2V)</span>
             </button>
 
             <button
               onClick={() => triggerSimulation(3)}
-              className="px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1"
+              className="px-3 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-800 font-bold transition flex items-center gap-1.5 shadow-sm"
             >
-              <Play className="w-3 h-3 text-rose-600" />
-              <span>Thermal Runaway (41.5°C)</span>
+              <Play className="w-3.5 h-3.5 text-rose-600" />
+              <span>3. Thermal Runaway (41.5°C)</span>
+            </button>
+
+            <button
+              onClick={() => triggerSimulation(4)}
+              className="px-3 py-2 rounded-xl border border-purple-200 bg-purple-50 hover:bg-purple-100 text-purple-800 font-bold transition flex items-center gap-1.5 shadow-sm"
+            >
+              <Play className="w-3.5 h-3.5 text-purple-600" />
+              <span>4. High Vibration (MPU-6050)</span>
+            </button>
+
+            <button
+              onClick={resetSimulation}
+              className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold transition flex items-center gap-1.5 shadow-sm ml-auto"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-slate-600" />
+              <span>Revert to Live Firebase RTDB</span>
             </button>
           </div>
         </div>
@@ -227,13 +258,13 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           <div className="flex justify-between items-center pb-3 border-b border-slate-100">
             <div>
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-900">
-                Live Physical Sensor Telemetry (ESP32)
+                Live Sensor Telemetry
               </h2>
-              <p className="text-xs text-slate-400">Continuous 2s Stream via Firebase Realtime Database</p>
+              <p className="text-xs text-slate-400">Continuous 2s Stream</p>
             </div>
             <span className="flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full font-bold">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>{source.includes("FIREBASE") ? "ESP32 Live Stream" : "Stream Active"}</span>
+              <span>{isSimulating ? `Demo Override (${simulationCountdown}s)` : "ESP32 Live Stream Active"}</span>
             </span>
           </div>
 
@@ -328,7 +359,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
           </div>
         </div>
 
-        {/* Comprehensive Vehicle History & 60s Logs Section */}
+        {/* History & 60s Logs Section */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-4 border-b border-slate-100 gap-3">
             <div className="flex rounded-xl bg-slate-100 p-1 border border-slate-200 text-xs">
@@ -497,7 +528,7 @@ export default function UserDashboard({ onBackToHome, onOpenAbout }) {
                 <ShieldCheck className="w-4 h-4 text-cyan-600" />
                 <span>Vehicle Specification & Calibration Link</span>
               </h2>
-              <p className="text-xs text-slate-400">Registered vehicle parameters and manufacturer envelope binding</p>
+              <p className="text-xs text-slate-400">Registered parameters and manufacturer envelope binding</p>
             </div>
 
             <button

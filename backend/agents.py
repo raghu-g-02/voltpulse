@@ -15,21 +15,28 @@ FAULT_NAME_MAP = {
     4: "Drivetrain Severe Mechanical Vibration & Imbalance",
 }
 
+# Calibrated for 3S 18650 Battery (11.1V-12.6V) + L298N + TT Gearbox Motor
 DEFAULT_HARDWARE_CALIBRATION = {
     "modelName": "3S Hardware Testbench (12V L298N)",
     "manufacturer": "VoltPulse Lab Rig",
     "voltage_nominal": 11.8,
     "voltage_sag_limit": 9.8,
     "current_nominal": 0.20,
-    "current_overload_limit": 0.85,
+    "current_overload_limit": 0.85,  # Triggered when wheel is physically held by hand
     "temp_nominal": 28.0,
-    "temp_critical_limit": 38.0,
+    "temp_critical_limit": 38.0,     # Easily demonstrated by warming the DS18B20 probe
     "rpm_max_rated": 260,
     "vibration_nominal": 9.81,
     "vibration_limit": 2.2,
 }
 
 class PredictiveDiagnosticAgent:
+    """
+    Evaluates multi-channel telemetry against model-specific calibration envelopes.
+    Converts physical readings into normalized stress ratios (0.0 to 1.0+ scale)
+    and provides real-time actionable guidance for the driver.
+    """
+
     def diagnose(self, telemetry: dict, model_calibration: dict = None) -> dict:
         v = float(telemetry.get("Voltage", telemetry.get("bus_voltage", 0.0)))
         i = float(telemetry.get("Current", telemetry.get("current_amps", 0.0)))
@@ -51,7 +58,7 @@ class PredictiveDiagnosticAgent:
         vib_limit = float(limits.get("vibration_limit", 2.2))
         model_name = limits.get("modelName", "3S Hardware Testbench")
 
-        # Standby filter
+        # Standby / Cold-Boot Filter
         if v <= 1.0 and t <= 1.0:
             return {
                 "fault_class": 0,
@@ -64,6 +71,7 @@ class PredictiveDiagnosticAgent:
                 "severity": "NOMINAL",
                 "asil_rating": "QM",
                 "hazard_description": "Hardware testbench in standby or ESP32 initializing.",
+                "driver_suggestion": "Power up the 3S battery and ESP32 logic rail to begin monitoring.",
                 "dtc_code": "DTC-SYS-000",
                 "model_applied": model_name,
                 "normalized_stress": {
@@ -84,6 +92,7 @@ class PredictiveDiagnosticAgent:
                 },
             }
 
+        # 1. Normalized Stress Ratios (0.0 to 1.0+ scale)
         norm_v_sag = max(0.0, (v_nom - v) / max(0.1, (v_nom - v_sag))) if v > 1.0 else 0.0
         norm_i_overload = i / max(0.05, i_crit)
         norm_t_overheat = max(0.0, (t - amb_t) / max(1.0, (t_crit - amb_t))) if t > amb_t else 0.0
@@ -98,6 +107,7 @@ class PredictiveDiagnosticAgent:
         active_fault_items = []
         fault_classes_detected = set()
 
+        # Fault 1: Motor Transmission Overload or Rotor Stall
         if norm_i_overload >= 1.0 or (i >= 0.65 and rpm < 35) or ml_fault_class == 1:
             fault_classes_detected.add(1)
             active_fault_items.append({
@@ -107,8 +117,10 @@ class PredictiveDiagnosticAgent:
                 "severity": "HIGH",
                 "dtc": "DTC-MECH-101",
                 "threshold_breach": f"{i:.2f}A draw >= {i_crit:.2f}A limit ({norm_i_overload*100:.0f}% load)",
+                "suggestion": "Release accelerator pedal immediately and check TT motor gearbox for mechanical binding or wheel stall."
             })
 
+        # Fault 2: 3S Battery Inverter Rail Voltage Sag
         if (norm_v_sag >= 1.0 and v > 1.0) or ml_fault_class == 2:
             fault_classes_detected.add(2)
             active_fault_items.append({
@@ -118,8 +130,10 @@ class PredictiveDiagnosticAgent:
                 "severity": "CRITICAL",
                 "dtc": "DTC-ELEC-202",
                 "threshold_breach": f"{v:.2f}V <= {v_sag:.2f}V cutoff limit ({norm_v_sag*100:.0f}% sag stress)",
+                "suggestion": "High voltage drop detected under load. Ease off the throttle and recharge or balance 3S battery cells."
             })
 
+        # Fault 3: Battery Pack Thermal Overheat
         if norm_t_overheat >= 1.0 or t >= t_crit or ml_fault_class == 3:
             fault_classes_detected.add(3)
             active_fault_items.append({
@@ -129,8 +143,10 @@ class PredictiveDiagnosticAgent:
                 "severity": "EMERGENCY",
                 "dtc": "DTC-THERM-303",
                 "threshold_breach": f"{t:.1f}°C >= {t_crit:.1f}°C limit (Rise: +{(t - amb_t):.1f}°C)",
+                "suggestion": "Critical temperature threshold breached! Pull over safely, power off the vehicle, and let the battery cool."
             })
 
+        # Fault 4: Excessive Mechanical Vibration
         if norm_vib >= 1.0:
             fault_classes_detected.add(1)
             active_fault_items.append({
@@ -140,6 +156,7 @@ class PredictiveDiagnosticAgent:
                 "severity": "MEDIUM",
                 "dtc": "DTC-VIB-404",
                 "threshold_breach": f"Lateral vibration {lateral_vib:.2f} m/s² >= {vib_limit:.2f} m/s² cap",
+                "suggestion": "Abnormal chassis oscillations detected. Check motor shaft alignment and mounting screws."
             })
 
         if not active_fault_items:
@@ -151,6 +168,7 @@ class PredictiveDiagnosticAgent:
             primary_asil = "QM"
             primary_dtc = "DTC-SYS-000"
             hazard_desc = f"Operating safely within calibrated {model_name} envelopes."
+            combined_suggestion = "Powertrain operating nominally. It is safe and fine to drive."
             active_count = 0
         else:
             active_count = len(active_fault_items)
@@ -158,9 +176,11 @@ class PredictiveDiagnosticAgent:
             primary_class = classes_sorted[0]
             labels_list = [item["label"] for item in active_fault_items]
             subsystems_list = list(set([item["subsystem"] for item in active_fault_items]))
+            suggestions_list = [item["suggestion"] for item in active_fault_items]
 
             composite_label = f"Multiple Faults ({active_count} Active): " + " & ".join(labels_list) if active_count > 1 else active_fault_items[0]["label"]
             combined_subsystem = ", ".join(subsystems_list)
+            combined_suggestion = " ".join(suggestions_list)
             primary_severity = "EMERGENCY" if 3 in fault_classes_detected else ("CRITICAL" if 2 in fault_classes_detected else "HIGH")
             primary_asil = "ASIL-D" if 3 in fault_classes_detected else ("ASIL-C" if 2 in fault_classes_detected else "ASIL-B")
             primary_dtc = active_fault_items[0]["dtc"]
@@ -187,8 +207,9 @@ class PredictiveDiagnosticAgent:
             "dtc_code": primary_dtc,
             "severity": primary_severity,
             "affected_subsystem": combined_subsystem,
-            "asil_rating": primary_asil,
             "hazard_description": hazard_desc,
+            "driver_suggestion": combined_suggestion,
+            "asil_rating": primary_asil,
             "model_applied": model_name,
             "normalized_stress": {
                 "voltage_sag": round(norm_v_sag, 2),
@@ -202,6 +223,8 @@ class PredictiveDiagnosticAgent:
 
 
 class AutonomousOutreachAgent:
+    """Generates speech synthesis advisories for faults and recoveries, and dispatches email alerts."""
+
     def __init__(self):
         self.last_email_sent_times = {}
         self.EMAIL_COOLDOWN_SECONDS = 180
@@ -212,22 +235,23 @@ class AutonomousOutreachAgent:
         curr = raw_telemetry.get("Current", 0.2)
         volt = raw_telemetry.get("Voltage", 11.8)
 
+        # RECOVERY / SAFE NOMINAL SCRIPT
         if not fault_classes:
-            return "All powertrain telemetry is nominal. 3S battery and drive motor running smoothly."
+            return "System recovered. All powertrain parameters have normalized. It is now safe and fine to drive."
 
         if len(fault_classes) > 1:
             return (
-                f"Warning! Multiple powertrain hazards detected: high current at {curr:.2f} amperes "
-                f"and battery temperature at {temp:.1f} degrees. Please ease off the throttle."
+                f"Urgent multi-system warning! High current draw at {curr:.2f} amperes "
+                f"with elevated temperature at {temp:.1f} degrees. Please release the accelerator and inspect the vehicle immediately."
             )
 
         single = fault_classes[0]
         if single == 1:
-            return f"Caution: Motor transmission stall detected! Current draw reached {curr:.2f} amperes. Please relieve mechanical load."
+            return f"Caution: Motor transmission stall detected! Current draw reached {curr:.2f} amperes. Please relieve mechanical load on the gearbox."
         elif single == 2:
-            return f"Notice: 3S traction pack voltage sag detected down to {volt:.2f} volts. Battery recharge recommended."
+            return f"Notice: Battery pack voltage sag detected down to {volt:.2f} volts. High throttle drain observed; recharge recommended."
         elif single == 3:
-            return f"Urgent safety alert: Battery temperature has climbed to {temp:.1f} degrees Celsius. Cooling recommended immediately."
+            return f"Emergency safety alert: Battery temperature has climbed to {temp:.1f} degrees Celsius! Please pull over safely and allow the pack to cool."
 
         return "Warning: Powertrain anomaly detected on testbench."
 
@@ -272,11 +296,12 @@ class AutonomousOutreachAgent:
 
                       <table style="width: 100%; font-size: 13px; color: #334155; margin-bottom: 15px;">
                         <tr><td><strong>Chassis VIN:</strong></td><td style="color: #0284c7; font-weight: bold;">{chassis}</td></tr>
-                        <tr><td><strong>Status:</strong></td><td style="color: #e11d48; font-weight: bold;">{diagnosis.get('diagnosis_label')}</td></tr>
-                        <tr><td><strong>Battery Pack Voltage:</strong></td><td>{v:.2f} V</td></tr>
+                        <tr><td><strong>Diagnosis:</strong></td><td style="color: #e11d48; font-weight: bold;">{diagnosis.get('diagnosis_label')}</td></tr>
+                        <tr><td><strong>Action Recommendation:</strong></td><td style="color: #475569;">{diagnosis.get('driver_suggestion')}</td></tr>
+                        <tr><td><strong>Battery Voltage:</strong></td><td>{v:.2f} V</td></tr>
                         <tr><td><strong>Current Draw:</strong></td><td>{i:.2f} A</td></tr>
-                        <tr><td><strong>Pack Temperature:</strong></td><td>{t:.1f} °C</td></tr>
-                        <tr><td><strong>Motor Speed:</strong></td><td>{rpm:.0f} RPM</td></tr>
+                        <tr><td><strong>Temperature:</strong></td><td>{t:.1f} °C</td></tr>
+                        <tr><td><strong>Speed:</strong></td><td>{rpm:.0f} RPM</td></tr>
                       </table>
                     </div>
                   </body>
@@ -349,5 +374,6 @@ class MasterOrchestratorAgent:
             },
             "booking": booking,
         }
+
 
 orchestrator = MasterOrchestratorAgent()
