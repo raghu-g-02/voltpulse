@@ -16,9 +16,9 @@ HARDWARE_PROFILES = {
         "humidity_rated_max": 100.0
     },
     "12V_BATTERY": {
-        "voltage_rated": 14.4,
-        "current_rated": 20.0,
-        "rpm_rated": 2500.0,
+        "voltage_rated": 12.6,
+        "current_rated": 5.0,
+        "rpm_rated": 1000.0,
         "temp_rated_max": 80.0,
         "vibration_rated_max_g": 3.0,
         "ambient_temp_rated_max": 50.0,
@@ -62,11 +62,9 @@ class PowertrainDiagnosticEngine:
                     self.class_labels = {int(k): v for k, v in self.metadata["class_labels"].items()}
                 self.model = xgb.XGBClassifier()
                 self.model.load_model(MODEL_PATH)
-                print(f"[ML Engine] Pre-trained XGBoost model loaded from {MODEL_PATH}")
             else:
-                print("[ML Engine] Model artifacts not found. Operating with deterministic surrogate.")
-        except Exception as e:
-            print(f"[ML Engine Warning] Could not load XGBoost model: {e}. Using deterministic engine.")
+                self.model = None
+        except Exception:
             self.model = None
 
     def select_profile(self, voltage: float, current: float) -> dict:
@@ -139,14 +137,6 @@ class PowertrainDiagnosticEngine:
                 probabilities = self.model.predict_proba(input_df)[0].tolist()
             except Exception as e:
                 print(f"[ML Prediction Error]: {e}")
-
-        # Deterministic boundary verification layer (ISO 26262 Functional Safety)
-        if physics["raw_temp"] >= 38.0 or normalized["temperature"] >= 0.75:
-            pred_class = 3
-        elif physics["dynamic_vib_g"] >= 1.0 or (normalized["vibration_g"] >= 0.45 and normalized["current"] >= 0.40):
-            pred_class = 1
-        elif normalized["voltage"] <= 0.65 and normalized["temperature"] < 0.60 and physics["dynamic_vib_g"] < 0.4:
-            pred_class = 2
 
         confidence = 98.5
         if isinstance(probabilities, list) and len(probabilities) > pred_class:

@@ -50,10 +50,10 @@ def find_calibration_for_chassis(chassis: str, requested_model: str = "") -> dic
     """Matches a chassis number to the Admin-calibrated model envelope."""
     clean_chassis = chassis.strip().upper()
 
-    # 1. Match by pre-assigned VIN list in catalog
+    # 1. Match by pre-assigned VIN list in catalog (Python .upper() fix)
     for m_id, m_data in vehicle_models_catalog.items():
         assigned = m_data.get("assignedChassis", [])
-        if isinstance(assigned, list) and any(str(c).strip().toUpperCase() == clean_chassis for c in assigned):
+        if isinstance(assigned, list) and any(str(c).strip().upper() == clean_chassis for c in assigned):
             return m_data
 
     # 2. Match by model name
@@ -63,7 +63,6 @@ def find_calibration_for_chassis(chassis: str, requested_model: str = "") -> dic
             if m_data.get("modelName", "").strip().lower() == norm_req or m_id.lower() == norm_req:
                 return m_data
 
-    # 3. Fallback to default model
     return vehicle_models_catalog.get("nexon-ev", DEFAULT_MODEL_CALIBRATION)
 
 @app.get("/")
@@ -80,8 +79,14 @@ def read_root():
 @app.post("/api/session/bind")
 def bind_session(req: SessionBindRequest):
     chassis = req.chassisNumber.strip().upper()
-    cal = find_calibration_for_chassis(chassis, req.vehicleModel)
     
+    # Prioritize supplied calibration, then catalog lookup, then fallback
+    cal = req.calibration or find_calibration_for_chassis(chassis, req.vehicleModel) or DEFAULT_MODEL_CALIBRATION
+    
+    # Cache model into catalog memory
+    model_name_key = (cal.get("modelName") or req.vehicleModel).strip().lower().replace(" ", "-")
+    vehicle_models_catalog[model_name_key] = cal
+
     active_vehicle_sessions[chassis] = {
         "userId": req.userId,
         "vehicleId": req.vehicleId,
@@ -92,7 +97,6 @@ def bind_session(req: SessionBindRequest):
         "chassisNumber": chassis,
         "calibration": cal,
     }
-    print(f"[Session Bound] Chassis: {chassis} linked to Model: {cal.get('modelName')} (Limits: {cal.get('voltage_min')}V-{cal.get('voltage_max')}V, {cal.get('current_max')}A)")
     return {"status": "SUCCESS", "chassis": chassis, "calibration": cal}
 
 @app.post("/api/session/unbind")
@@ -100,15 +104,10 @@ def unbind_session(req: SessionUnbindRequest):
     chassis = req.chassisNumber.strip().upper()
     if chassis in active_vehicle_sessions:
         del active_vehicle_sessions[chassis]
-        print(f"[Session Unbound] Chassis: {chassis}")
     return {"status": "SUCCESS", "chassis": chassis}
 
 @app.post("/api/models/sync")
 def sync_model(req: ModelSyncRequest):
-    """
-    Called whenever Admin saves/edits a model in VehicleModelManager.
-    Updates all vehicles tied to this model or its assigned VINs in memory.
-    """
     vehicle_models_catalog[req.modelId] = req.modelData
     updated_chassis = []
 
@@ -125,7 +124,6 @@ def sync_model(req: ModelSyncRequest):
             sess["vehicleModel"] = req.modelData.get("modelName", sess.get("vehicleModel"))
             updated_chassis.append(c)
 
-    print(f"[Model Synced by Admin] Model: {req.modelId} updated across active sessions: {updated_chassis}")
     return {"status": "SUCCESS", "modelId": req.modelId, "affected_sessions": len(updated_chassis)}
 
 def _extract_telemetry_fields(data: Any, chassis: str) -> Optional[dict]:
@@ -200,7 +198,6 @@ async def revert_simulation_after_delay(chassis: str, delay_seconds: float = 10.
         await asyncio.sleep(delay_seconds)
         if chassis in active_simulations:
             del active_simulations[chassis]
-            print(f"[Simulation Expired] Reverted {chassis} to live Firebase RTDB.")
     except asyncio.CancelledError:
         pass
 
@@ -225,6 +222,7 @@ def get_latest_state(chassis: str):
             "fullName": "Vehicle Owner",
             "calibration": cal,
         }
+        active_vehicle_sessions[c] = session
 
     sim = active_simulations.get(c)
     if sim:
@@ -269,7 +267,6 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 1:
-        # Breaches Admin current threshold
         sim_data = {
             "Voltage": round(v_nom, 2),
             "Current": round(i_max * 1.40, 2),
@@ -283,7 +280,6 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 2:
-        # Breaches Admin voltage min cutoff
         sim_data = {
             "Voltage": round(max(0.0, v_min - 1.2), 2),
             "Current": 0.24,
@@ -297,7 +293,6 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 3:
-        # Breaches Admin thermal max cutoff
         sim_data = {
             "Voltage": round(v_nom, 2),
             "Current": 0.22,
@@ -311,7 +306,6 @@ async def simulate_fault(chassis: str, fault_class: int):
             "chassis": c,
         }
     elif fault_class == 4:
-        # Breaches Admin dynamic vibration cutoff
         sim_data = {
             "Voltage": round(v_nom, 2),
             "Current": 0.35,
@@ -329,7 +323,6 @@ async def simulate_fault(chassis: str, fault_class: int):
 
     active_simulations[c] = sim_data
     agent_res = orchestrator.process_telemetry(sim_data, session)
-
     simulation_tasks[c] = asyncio.create_task(revert_simulation_after_delay(c, 10.0))
 
     return {
@@ -356,7 +349,6 @@ def reset_simulation(chassis: str):
 async def websocket_telemetry(websocket: WebSocket, chassis: str):
     await websocket.accept()
     c = chassis.strip().upper()
-    print(f"[WebSocket Connected] Live stream established for chassis: {c}")
 
     try:
         while True:
@@ -369,6 +361,7 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
                     "fullName": "Vehicle Owner",
                     "calibration": cal,
                 }
+                active_vehicle_sessions[c] = session
 
             sim = active_simulations.get(c)
             if sim:
@@ -393,6 +386,6 @@ async def websocket_telemetry(websocket: WebSocket, chassis: str):
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
-        print(f"[WebSocket Disconnected] Client closed: {c}")
+        pass
     except Exception as e:
         print(f"[WebSocket Error] {e}")

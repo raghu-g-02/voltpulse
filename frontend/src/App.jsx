@@ -41,7 +41,7 @@ function AppRouter() {
             onBackToHome={() => setInternalView("home")} 
             onOpenConsole={() => setInternalView("console")} 
           />
-        ) : internalView === "console" ? (
+        ) : (internalView === "console" || internalView === "cockpit") ? (
           <UserDashboard 
             onBackToHome={() => setInternalView("home")} 
             onOpenAbout={() => setInternalView("about")} 

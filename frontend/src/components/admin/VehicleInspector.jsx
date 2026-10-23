@@ -4,7 +4,7 @@ import {
   ArrowLeft, Download, CheckCircle2, AlertOctagon, Car, 
   User, ChevronDown, ChevronUp, Zap, Activity, Gauge, 
   Thermometer, Wind, Droplets, Clock, Filter, ArrowUpDown, 
-  Trash2, ArrowUpRight, ArrowDownRight
+  Trash2, ArrowUpRight, ArrowDownRight, Waves, Cpu
 } from "lucide-react";
 
 export default function VehicleInspector({
@@ -24,29 +24,37 @@ export default function VehicleInspector({
   const [filterType, setFilterType] = useState("ALL");
   const [sortOrder, setSortOrder] = useState("DESC");
 
-  const vNom = parseFloat(modelCalibration?.voltage_nominal || 5.0);
-  const vSag = parseFloat(modelCalibration?.voltage_sag_limit || 4.2);
-  const iOver = parseFloat(modelCalibration?.current_overload_limit || 0.95);
-  const tCrit = parseFloat(modelCalibration?.temp_critical_limit || 42.0);
+  const vMin = parseFloat(modelCalibration?.voltage_min ?? modelCalibration?.voltage_sag_limit ?? 9.8);
+  const vMax = parseFloat(modelCalibration?.voltage_max ?? 12.6);
+  const iOver = parseFloat(modelCalibration?.current_max ?? modelCalibration?.current_overload_limit ?? 0.85);
+  const tCrit = parseFloat(modelCalibration?.temp_max ?? modelCalibration?.temp_critical_limit ?? 38.0);
+  const rpmMax = parseFloat(modelCalibration?.rpm_max ?? modelCalibration?.rpm_max_rated ?? 260);
+  const vibMax = parseFloat(modelCalibration?.vibration_max ?? modelCalibration?.vibration_limit ?? 2.2);
 
   const curV = parseFloat(liveTelemetry?.Voltage ?? 0);
   const curI = parseFloat(liveTelemetry?.Current ?? 0);
   const curT = parseFloat(liveTelemetry?.Temperature ?? 0);
+  const curRpm = Math.round(liveTelemetry?.motor_rpm ?? 0);
+  const vibX = parseFloat(liveTelemetry?.vibration_x ?? 0.05);
+  const vibY = parseFloat(liveTelemetry?.vibration_y ?? 0.08);
+  const vibZ = parseFloat(liveTelemetry?.vibration_z ?? 9.81);
+  const dynamicVib = Math.max(0.0, Math.abs(Math.sqrt(vibX**2 + vibY**2 + vibZ**2) - 9.81));
 
-  const isVoltageLow = curV > 0.5 && curV <= vSag;
+  const isVoltageLow = curV > 0.5 && (curV < vMin || curV > vMax);
   const isTempHigh = curT >= tCrit;
   const isOverload = curI >= iOver;
-  const isFaultActive = isVoltageLow || isTempHigh || isOverload;
+  const isVibHigh = dynamicVib >= vibMax;
+  const isFaultActive = isVoltageLow || isTempHigh || isOverload || isVibHigh;
 
   const getInspectFaultTitle = () => {
     const activeWarnings = [];
     if (isTempHigh) activeWarnings.push("Thermal Overheat");
-    if (isVoltageLow) activeWarnings.push("Inverter Voltage Sag");
+    if (isVoltageLow) activeWarnings.push(curV < vMin ? "Voltage Sag" : "Voltage Surge");
     if (isOverload) activeWarnings.push("Motor Overload");
+    if (isVibHigh) activeWarnings.push("Severe Vibration");
     return activeWarnings.length > 1 ? `Multiple Faults: ${activeWarnings.join(" & ")}` : (activeWarnings[0] || "Anomaly Active");
   };
 
-  // Filter & Sort Fault History
   let displayedFaults = [...faults];
   if (filterType === "INCREASES_ONLY") {
     displayedFaults = displayedFaults.filter((f) => f.eventType === "FAULT_INCEPTION" || f.eventType === "FAULT_ESCALATED");
@@ -55,10 +63,8 @@ export default function VehicleInspector({
   } else if (filterType === "RECOVERIES_ONLY") {
     displayedFaults = displayedFaults.filter((f) => f.eventType === "RECOVERY_NORMAL");
   }
-
   displayedFaults.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
 
-  // Sort Logs
   let displayedLogs = [...logs];
   displayedLogs.sort((a, b) => sortOrder === "ASC" ? a.timestampRaw - b.timestampRaw : b.timestampRaw - a.timestampRaw);
 
@@ -100,7 +106,7 @@ export default function VehicleInspector({
             </div>
             <div className="text-xs opacity-90 mt-0.5">
               {!isFaultActive
-                ? `Operational limits: Voltage > ${vSag}V, Current < ${iOver}A, Temp < ${tCrit}°C.`
+                ? `Operational limits: Voltage ${vMin}V–${vMax}V, Current < ${iOver}A, Temp < ${tCrit}°C.`
                 : "Parameters breached the model's calibrated safety envelope."}
             </div>
           </div>
@@ -180,16 +186,16 @@ export default function VehicleInspector({
           )}
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3.5">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
             <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
               <span>Battery Voltage</span>
               <Zap className="w-4 h-4 text-cyan-600" />
             </div>
             <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {parseFloat(liveTelemetry?.Voltage ?? 0).toFixed(2)} <span className="text-sm font-normal text-slate-500">V</span>
+              {curV.toFixed(2)} <span className="text-sm font-normal text-slate-500">V</span>
             </div>
-            <div className="text-[11px] text-slate-400 mt-1">Sag Limit: &le; {vSag} V</div>
+            <div className="text-[11px] text-slate-400 mt-1">Safe: {vMin}V–{vMax}V</div>
           </div>
 
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -198,7 +204,7 @@ export default function VehicleInspector({
               <Activity className="w-4 h-4 text-blue-600" />
             </div>
             <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {parseFloat(liveTelemetry?.Current ?? 0).toFixed(2)} <span className="text-sm font-normal text-slate-500">A</span>
+              {curI.toFixed(2)} <span className="text-sm font-normal text-slate-500">A</span>
             </div>
             <div className="text-[11px] text-slate-400 mt-1">Overload: &ge; {iOver} A</div>
           </div>
@@ -209,9 +215,9 @@ export default function VehicleInspector({
               <Gauge className="w-4 h-4 text-indigo-600" />
             </div>
             <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {Math.round(liveTelemetry?.motor_rpm ?? 0)} <span className="text-sm font-normal text-slate-500">RPM</span>
+              {curRpm} <span className="text-sm font-normal text-slate-500">RPM</span>
             </div>
-            <div className="text-[11px] text-slate-400 mt-1">Max: {modelCalibration?.rpm_max_rated || 250} RPM</div>
+            <div className="text-[11px] text-slate-400 mt-1">Max: {rpmMax} RPM</div>
           </div>
 
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
@@ -220,31 +226,9 @@ export default function VehicleInspector({
               <Thermometer className="w-4 h-4 text-amber-600" />
             </div>
             <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {parseFloat(liveTelemetry?.Temperature ?? 0).toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
+              {curT.toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
             </div>
             <div className="text-[11px] text-slate-400 mt-1">Thermal Cutoff: &ge; {tCrit} °C</div>
-          </div>
-
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-            <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
-              <span>Outside Temp</span>
-              <Wind className="w-4 h-4 text-emerald-600" />
-            </div>
-            <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {parseFloat(liveTelemetry?.ambient_temp ?? 25.0).toFixed(1)} <span className="text-sm font-normal text-slate-500">°C</span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">Ambient Weather</div>
-          </div>
-
-          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
-            <div className="flex justify-between items-center text-slate-500 text-xs font-semibold">
-              <span>Outside Humidity</span>
-              <Droplets className="w-4 h-4 text-teal-600" />
-            </div>
-            <div className="text-2xl font-black font-mono text-slate-900 mt-2">
-              {parseFloat(liveTelemetry?.ambient_humidity ?? 50.0).toFixed(0)} <span className="text-sm font-normal text-slate-500">%</span>
-            </div>
-            <div className="text-[11px] text-slate-400 mt-1">Moisture Level</div>
           </div>
         </div>
       </div>
