@@ -21,12 +21,12 @@ export default function HomeDashboard({ onOpenConsole, onOpenAbout }) {
         <Navbar 
           currentView="home" 
           onNavigate={(view) => {
-            if (view === "console") onOpenConsole();
+            if (view === "console" || view === "cockpit") onOpenConsole();
             if (view === "about") onOpenAbout();
           }} 
         />
 
-        {/* 1. WELCOME HERO BANNER */}
+        {/* 1. Welcome Banner */}
         <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <span className="text-xs font-bold uppercase tracking-wider text-cyan-700 font-mono">
@@ -36,7 +36,7 @@ export default function HomeDashboard({ onOpenConsole, onOpenAbout }) {
               Welcome, {userProfile?.fullName || "Vehicle Owner"}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Your {userProfile?.vehicleModel || "Electric Vehicle"} is connected and ready for your journey.
+              Your {userProfile?.vehicleModel || "3S Hardware Testbench"} is connected and streaming telemetry.
             </p>
           </div>
 
@@ -49,9 +49,9 @@ export default function HomeDashboard({ onOpenConsole, onOpenAbout }) {
           </button>
         </div>
 
-        {/* 2. SIMPLE NAVIGATION ACTION TILES (MATCHING ADMIN HOME STYLE) */}
+        {/* 2. Navigation Action Tiles */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-          {/* Tile 1: Launch Cockpit HUD */}
+          {/* Tile 1: Cockpit HUD */}
           <div 
             onClick={onOpenConsole}
             className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition cursor-pointer space-y-3 group"
@@ -85,7 +85,7 @@ export default function HomeDashboard({ onOpenConsole, onOpenAbout }) {
             </div>
           </div>
 
-          {/* Tile 3: High-Level Powertrain Health Summary */}
+          {/* Tile 3: Health Status */}
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-3">
             <span className={`p-3 rounded-xl inline-block border ${
               isSafe 
